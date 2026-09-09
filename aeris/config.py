@@ -62,9 +62,66 @@ class RegimeConfig:
 
 
 @dataclass
+class RoutingConfig:
+    """
+    Configuration for Module 3 Dynamic Forecast Model Routing.
+    
+    Attributes:
+        regime_preferred_models: Mapping from RegimeType name to preferred model name.
+        fallback_order: Sequence of model names to try if preferred model is unavailable or fails.
+        min_history_steps: Minimum history points required before non-baseline models are used.
+        enable_performance_routing: Whether to factor recent walk-forward error into routing.
+    """
+    regime_preferred_models: Optional[dict] = None
+    fallback_order: Optional[list] = None
+    min_history_steps: int = 10
+    enable_performance_routing: bool = True
+
+    def __post_init__(self):
+        if self.regime_preferred_models is None:
+            self.regime_preferred_models = {
+                "NORMAL_DEMAND": "arima",
+                "PEAK_SHOCK": "xgboost",
+                "STRUCTURAL_SHIFT": "xgboost",
+                "FESTIVAL_EVENT": "event_aware",
+                "WARMING_UP": "baseline",
+            }
+        if self.fallback_order is None:
+            self.fallback_order = ["xgboost", "arima", "baseline"]
+
+
+@dataclass
+class ForecastingConfig:
+    """
+    Configuration for Module 3 Forecasting Models.
+    
+    Attributes:
+        forecast_horizon: Number of time steps to predict ahead (default h=1).
+        arima_seasonal_period: Seasonal period for ARIMA / Exponential Smoothing.
+        xgboost_n_estimators: Number of boosting rounds for XGBoost.
+        xgboost_max_depth: Maximum tree depth for XGBoost.
+        xgboost_learning_rate: Learning rate for XGBoost.
+        xgboost_lags: Lag offsets to use as features (e.g. [1, 2, 3, 24]).
+        baseline_strategy: Strategy for baseline model ("last_value", "mean", "median").
+    """
+    forecast_horizon: int = 1
+    arima_seasonal_period: Optional[int] = 24
+    xgboost_n_estimators: int = 50
+    xgboost_max_depth: int = 4
+    xgboost_learning_rate: float = 0.05
+    xgboost_lags: Optional[list] = None
+    baseline_strategy: str = "last_value"
+
+    def __post_init__(self):
+        if self.xgboost_lags is None:
+            self.xgboost_lags = [1, 2, 3, 24]
+
+
+@dataclass
 class LoggerConfig:
     """Structured logging configuration."""
     level: str = "INFO"
     json_format: bool = True
     log_to_stdout: bool = True
     log_file: Optional[str] = None
+

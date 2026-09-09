@@ -97,6 +97,71 @@ Each observation yields a `RegimeClassificationResult`:
 
 ---
 
+## Module 3: Dynamic Forecast Model Routing (ROUTE Stage)
+
+Module 3 is the **ROUTE** stage of AERIS. It dynamically selects and executes an appropriate electricity-demand forecasting model based on the contextual regime classified by Module 2, Bayesian change signals from Module 1, online demand features, model readiness, and walk-forward historical error metrics.
+
+### Pipeline Flow:
+$$\text{Live Stream} \longrightarrow \underbrace{\text{Module 1 (BOCPD)}}_{\text{DETECT}} \longrightarrow \underbrace{\text{Module 2 (Regime)}}_{\text{UNDERSTAND}} \longrightarrow \underbrace{\text{Module 3 (Router)}}_{\text{ROUTE}} \longrightarrow (\text{RoutingResult}, \text{ForecastResult})$$
+
+- **Module 1**: *"Something changed (P(change) = 0.92)."*
+- **Module 2**: *"This looks like a `PEAK_SHOCK` demand surge."*
+- **Module 3**: *"Routing to `xgboost` regressor trained strictly on past feature history."*
+
+---
+
+## Available Forecasting Models
+
+1. **`ARIMAForecastModel` (`arima`)**: Statistical baseline model (Exponential Smoothing / AutoReg / ARIMA). Preferred during stable `NORMAL_DEMAND` regimes.
+2. **`XGBoostForecastModel` (`xgboost`)**: Responsive supervised model using lag features ($x_{t-1}, x_{t-2}, x_{t-3}, x_{t-24}$), rolling mean/std, and calendar features. Preferred during `PEAK_SHOCK` and `STRUCTURAL_SHIFT` regimes.
+3. **`EventAwareForecastModel` (`event_aware`)**: Contextual strategy applied during `FESTIVAL_EVENT` regimes strictly when explicit event indicator features are present.
+4. **`BaselinePersistenceModel` (`baseline`)**: Deterministic fallback model (last-value persistence, rolling mean, or median). Guaranteed to execute cleanly even with minimal history.
+5. **`LSTMForecastModelStub` (`lstm`)**: Documented extension stub interface for Deep Learning (PyTorch/TensorFlow) model integration. Clearly exposes `WARMING_UP` status without faking predictions.
+
+---
+
+## Model Registry Plugin Architecture
+
+Models decouple from the core router via `ModelRegistry`:
+
+```python
+registry = ModelRegistry()
+registry.register(ARIMAForecastModel())
+registry.register(XGBoostForecastModel())
+registry.register(EventAwareForecastModel())
+registry.register(BaselinePersistenceModel())
+registry.register(LSTMForecastModelStub())
+```
+
+---
+
+## Routing Policy & Robust Fallback Strategy
+
+The router applies a transparent, data-aware routing policy:
+
+- **`NORMAL_DEMAND`** $\longrightarrow$ Preferred: `arima` (fallback: `xgboost` $\to$ `baseline`)
+- **`PEAK_SHOCK`** $\longrightarrow$ Preferred: `xgboost` (fallback: `arima` $\to$ `baseline`)
+- **`STRUCTURAL_SHIFT`** $\longrightarrow$ Preferred: `xgboost` (fallback: `arima` $\to$ `baseline`)
+- **`FESTIVAL_EVENT`** $\longrightarrow$ Preferred: `event_aware` (if explicit event feature exists; fallback to `xgboost`/`arima` if missing)
+- **`WARMING_UP` / Insufficient History** $\longrightarrow$ Fallback: `baseline`
+
+---
+
+## Anti-Data-Leakage & Walk-Forward Evaluation
+
+Module 3 strictly enforces chronological safety:
+- **Zero Future Lookahead**: At timestamp $t$, models are fitted and features constructed strictly using observations $x_{\le t}$. Future observations ($x_{>t}$) or future change points are never visible.
+- **Walk-Forward Validation**: Model accuracy (MAE) is updated chronologically as actual observations $y_{t+1}$ arrive, preserving time-series ordering without random shuffling.
+
+---
+
+## Module 3 Limitations
+
+1. **LSTM Extension Stub**: The LSTM implementation is provided as an explicit extension stub point. It does not fake predictions.
+2. **Short History Cold-Start**: During the initial warmup window ($t < 5$), the router safely defaults to the deterministic baseline persistence model.
+
+---
+
 ## Installation & Test Execution
 
 ### Installation:
@@ -104,16 +169,20 @@ Each observation yields a `RegimeClassificationResult`:
 pip install -r requirements.txt
 ```
 
-### Run All Tests (Module 1 + Module 2):
+### Run ALL Tests (Module 1 + Module 2 + Module 3):
 ```bash
 pytest -v
 ```
 
-### Run Module 1 & Module 2 Demonstrations:
+### Run Demonstrations:
 ```bash
 # Module 1 (BOCPD Detection)
 python demo.py
 
 # Module 2 (End-to-End Ingestion -> Detection -> Regime Classification)
 python demo_module2.py
+
+# Module 3 (End-to-End DETECT -> UNDERSTAND -> ROUTE Pipeline)
+python demo_module3.py
 ```
+

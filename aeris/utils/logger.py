@@ -144,6 +144,71 @@ class AERISLogger:
             level="ERROR"
         )
 
+    def log_routing_decision(
+        self,
+        timestamp: str,
+        selected_model: str,
+        regime: str,
+        confidence: float,
+        reason: str,
+        change_prob: float,
+        fallback_used: bool
+    ) -> None:
+        self._log_event(
+            "ROUTING_DECISION",
+            {
+                "timestamp": timestamp,
+                "selected_model": selected_model,
+                "regime": regime,
+                "confidence": round(confidence, 4),
+                "reason": reason,
+                "change_probability": round(change_prob, 6),
+                "fallback_used": fallback_used
+            }
+        )
+
+    def log_model_selected(self, timestamp: str, selected_model: str, regime: str) -> None:
+        self._log_event(
+            "MODEL_SELECTED",
+            {
+                "timestamp": timestamp,
+                "selected_model": selected_model,
+                "regime": regime
+            }
+        )
+
+    def log_model_fallback(self, timestamp: str, failed_model: str, fallback_model: str, reason: str) -> None:
+        self._log_event(
+            "MODEL_FALLBACK",
+            {
+                "timestamp": timestamp,
+                "failed_model": failed_model,
+                "fallback_model": fallback_model,
+                "reason": reason
+            },
+            level="WARNING"
+        )
+
+    def log_model_training_started(self, model_name: str) -> None:
+        self._log_event(
+            "MODEL_TRAINING_STARTED",
+            {"model_name": model_name}
+        )
+
+    def log_model_training_completed(self, model_name: str, duration_ms: float) -> None:
+        self._log_event(
+            "MODEL_TRAINING_COMPLETED",
+            {"model_name": model_name, "duration_ms": round(duration_ms, 2)}
+        )
+
+    def log_model_prediction_failed(self, model_name: str, error_msg: str) -> None:
+        self._log_event(
+            "MODEL_PREDICTION_FAILED",
+            {"model_name": model_name, "error": error_msg},
+            level="ERROR"
+        )
+
 
 # Global default logger instance
 default_logger = AERISLogger()
+
