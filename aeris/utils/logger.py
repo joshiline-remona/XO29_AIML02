@@ -1,11 +1,13 @@
 """
-Structured Logger for AERIS Module 1.
+Structured Logger for AERIS Module 1 & Module 2.
 
 Emits structured events (JSON or formatted text) for:
 - OBSERVATION_RECEIVED
 - CHANGE_PROBABILITY_UPDATED
 - ANOMALY_DETECTED
 - CHANGE_DETECTED
+- REGIME_FEATURES_UPDATED
+- REGIME_CLASSIFIED
 - STREAM_ERROR / VALIDATION_ERROR
 """
 
@@ -102,6 +104,37 @@ class AERISLogger:
                 "new_regime_std": round(posterior_std, 2)
             },
             level="WARNING"
+        )
+
+    def log_regime_features_updated(self, timestamp: str, z_score: float, rolling_mean: float, rolling_std: float) -> None:
+        self._log_event(
+            "REGIME_FEATURES_UPDATED",
+            {
+                "timestamp": timestamp,
+                "z_score": round(z_score, 4),
+                "rolling_mean": round(rolling_mean, 2),
+                "rolling_std": round(rolling_std, 2)
+            },
+            level="DEBUG"
+        )
+
+    def log_regime_classified(
+        self,
+        timestamp: str,
+        regime: str,
+        confidence: float,
+        reason: str,
+        change_prob: float
+    ) -> None:
+        self._log_event(
+            "REGIME_CLASSIFIED",
+            {
+                "timestamp": timestamp,
+                "regime": regime,
+                "confidence": round(confidence, 4),
+                "reason": reason,
+                "change_probability": round(change_prob, 6)
+            }
         )
 
     def log_validation_error(self, timestamp: Any, demand_mw: Any, reason: str) -> None:

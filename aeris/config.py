@@ -1,5 +1,5 @@
 """
-Configuration parameters for AERIS Module 1: Ingestion & Bayesian Change-Point Detection.
+Configuration parameters for AERIS Module 1 & Module 2.
 """
 
 from dataclasses import dataclass
@@ -41,6 +41,23 @@ class BOCPDConfig:
     anomaly_threshold: float = 0.25
     min_confirm_steps: int = 2
     prune_threshold: float = 1e-5
+    warmup_steps: int = 10
+
+
+@dataclass
+class RegimeConfig:
+    """
+    Configuration for Module 2 Contextual Regime Classifier.
+    
+    Attributes:
+        rolling_window: Historical window size for online rolling statistics.
+        peak_shock_z_threshold: Z-score threshold to flag a peak demand shock.
+        change_prob_threshold: Minimum change-point probability to signal structural shift.
+        warmup_steps: Minimum historical observations before confidence classification starts.
+    """
+    rolling_window: int = 24
+    peak_shock_z_threshold: float = 2.5
+    change_prob_threshold: float = 0.5
     warmup_steps: int = 10
 
 

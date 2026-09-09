@@ -1,11 +1,12 @@
 """
-Synthetic Data Stream Generator for AERIS Module 1 Testing.
+Synthetic Data Stream Generator for AERIS Module 1 & Module 2 Testing.
 
-Generates reproducible streaming time series for the 4 hackathon validation scenarios:
+Generates reproducible streaming time series for the hackathon validation scenarios:
 1. Stable demand with normal Gaussian noise.
 2. Single isolated extreme spike (transient anomaly).
 3. Persistent baseline step change (structural regime shift).
 4. Gradual demand drift/ramp.
+5. Festival / Calendar Event demand pattern.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -130,3 +131,42 @@ class SyntheticStreamGenerator:
             )
             for i, (ts, d) in enumerate(zip(timestamps, demands))
         ]
+
+    @classmethod
+    def generate_scenario_5_festival_event(
+        cls,
+        n_steps: int = 100,
+        baseline_mw: float = 500.0,
+        festival_start_idx: int = 40,
+        festival_duration: int = 10,
+        festival_surge_mw: float = 120.0,
+        noise_std: float = 10.0,
+        seed: int = 42
+    ) -> List[DemandObservation]:
+        """TEST 5: Festival/calendar event with explicit metadata flag."""
+        rng = np.random.default_rng(seed)
+        timestamps = cls._create_timestamps(n_steps)
+        
+        demands = rng.normal(loc=baseline_mw, scale=noise_std, size=n_steps)
+        observations: List[DemandObservation] = []
+        
+        festival_end_idx = festival_start_idx + festival_duration
+        for i, (ts, d) in enumerate(zip(timestamps, demands)):
+            is_fest = festival_start_idx <= i < festival_end_idx
+            val = float(d + (festival_surge_mw if is_fest else 0.0))
+            meta = {
+                "scenario": "festival_event",
+                "is_event": is_fest,
+                "is_holiday": is_fest,
+                "event_name": "Diwali Festival" if is_fest else ""
+            }
+            observations.append(
+                DemandObservation(
+                    timestamp=ts,
+                    demand_mw=val,
+                    sequence_idx=i,
+                    metadata=meta
+                )
+            )
+            
+        return observations
