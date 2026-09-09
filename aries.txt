@@ -1,0 +1,2989 @@
+print("AERIS FILE STARTED", flush=True)
+
+import os
+import tkinter as tk
+import numpy as np
+import pandas as pd
+
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_absolute_error
+
+
+# ============================================================
+# AERIS
+# Adaptive Electricity Regime Intelligence System
+#
+# DETECT → UNDERSTAND → ROUTE → QUANTIFY
+#
+# PS02 - THE QUIET SHIFT
+# ============================================================
+
+
+FILE = "xo.xlsx"
+TARGET = "target"
+
+# ------------------------------------------------------------
+# QUIET SHIFT PARAMETERS
+# ------------------------------------------------------------
+
+BASELINE_WINDOW = 30
+DETECTION_WINDOW = 7
+
+WATCH_THRESHOLD = 0.40
+CHANGE_THRESHOLD = 0.75
+
+# Number of consecutive strong signals required
+# before calling something a genuine change.
+PERSISTENCE_REQUIRED = 3
+
+# Adaptive conformal target coverage
+COVERAGE_LEVEL = 0.90
+
+
+# ============================================================
+# 1. DATA INGESTION
+# ============================================================
+
+def load_data():
+
+    print("\n" + "=" * 75)
+    print("                         AERIS STARTING")
+    print("=" * 75)
+
+    print("\n[1] DATA INGESTION")
+
+    if not os.path.exists(FILE):
+        print(f"ERROR: {FILE} not found.")
+        print("Put xo.xlsx in the same folder as aeris.py.")
+        return None
+
+    df = pd.read_excel(FILE)
+
+    if "timestamp" not in df.columns:
+        print("ERROR: timestamp column not found.")
+        return None
+
+    if TARGET not in df.columns:
+        print("ERROR: target column not found.")
+        return None
+
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+
+    df = df.sort_values("timestamp")
+    df = df.dropna(subset=[TARGET])
+    df = df.reset_index(drop=True)
+
+    print(f"    Observations : {len(df)}")
+
+    print(
+        f"    Date range   : "
+        f"{df['timestamp'].min().date()} "
+        f"→ "
+        f"{df['timestamp'].max().date()}"
+    )
+
+    print(
+        f"    Target       : {TARGET}"
+    )
+
+    return df
+
+
+# ============================================================
+# 2. FEATURE ENGINEERING
+# ============================================================
+
+def create_features(df):
+
+    print("\n[2] FEATURE ENGINEERING")
+
+    data = df.copy()
+
+    # Calendar features
+    data["day_of_week"] = (
+        data["timestamp"].dt.dayofweek
+    )
+
+    data["month"] = (
+        data["timestamp"].dt.month
+    )
+
+    data["day_of_year"] = (
+        data["timestamp"].dt.dayofyear
+    )
+
+    # Demand lags
+    data["lag_1"] = (
+        data[TARGET].shift(1)
+    )
+
+    data["lag_7"] = (
+        data[TARGET].shift(7)
+    )
+
+    data["lag_14"] = (
+        data[TARGET].shift(14)
+    )
+
+    # Rolling statistics
+    data["rolling_mean_7"] = (
+        data[TARGET]
+        .rolling(7)
+        .mean()
+    )
+
+    data["rolling_std_7"] = (
+        data[TARGET]
+        .rolling(7)
+        .std()
+    )
+
+    data = data.dropna()
+    data = data.reset_index(drop=True)
+
+    print(
+        "    Created:"
+    )
+
+    print(
+        "       • calendar features"
+    )
+
+    print(
+        "       • lag 1 / 7 / 14"
+    )
+
+    print(
+        "       • 7-day rolling mean"
+    )
+
+    print(
+        "       • 7-day rolling volatility"
+    )
+
+    print(
+        f"    Usable rows : {len(data)}"
+    )
+
+    return data
+
+
+# ============================================================
+# 3. BAYESIAN-STYLE QUIET SHIFT DETECTOR
+# ============================================================
+
+def calculate_change_probability(values):
+
+    values = np.asarray(
+        values,
+        dtype=float
+    )
+
+    required = (
+        BASELINE_WINDOW
+        +
+        DETECTION_WINDOW
+    )
+
+    if len(values) < required:
+
+        return {
+            "probability": 0.0,
+            "mean_shift": 0.0,
+            "standardized_shift": 0.0,
+            "volatility_ratio": 1.0,
+            "recent_mean": 0.0,
+            "baseline_mean": 0.0,
+            "recent_std": 0.0,
+            "baseline_std": 1.0
+        }
+
+    # --------------------------------------------------------
+    # Historical baseline
+    # --------------------------------------------------------
+
+    baseline = values[
+        -(BASELINE_WINDOW + DETECTION_WINDOW):
+        -DETECTION_WINDOW
+    ]
+
+    # --------------------------------------------------------
+    # Recent detection window
+    # --------------------------------------------------------
+
+    recent = values[
+        -DETECTION_WINDOW:
+    ]
+
+    baseline_mean = np.mean(
+        baseline
+    )
+
+    recent_mean = np.mean(
+        recent
+    )
+
+    baseline_std = np.std(
+        baseline
+    )
+
+    recent_std = np.std(
+        recent
+    )
+
+    if baseline_std < 1e-6:
+        baseline_std = 1e-6
+
+    # --------------------------------------------------------
+    # Signal 1:
+    # Mean shift
+    # --------------------------------------------------------
+
+    mean_shift = abs(
+        recent_mean
+        -
+        baseline_mean
+    )
+
+    standardized_shift = (
+        mean_shift
+        /
+        baseline_std
+    )
+
+    # --------------------------------------------------------
+    # Signal 2:
+    # Volatility shift
+    # --------------------------------------------------------
+
+    volatility_ratio = (
+        recent_std
+        /
+        baseline_std
+    )
+
+    volatility_evidence = abs(
+        np.log(
+            max(
+                volatility_ratio,
+                1e-6
+            )
+        )
+    )
+
+    # --------------------------------------------------------
+    # Combined evidence
+    # --------------------------------------------------------
+
+    evidence = (
+        0.75 * standardized_shift
+        +
+        0.25 * volatility_evidence
+    )
+
+    # Convert evidence to bounded
+    # probability-like score.
+    probability = (
+        1
+        -
+        np.exp(
+            -evidence / 2
+        )
+    )
+
+    probability = float(
+        np.clip(
+            probability,
+            0,
+            0.99
+        )
+    )
+
+    return {
+
+        "probability":
+            probability,
+
+        "mean_shift":
+            mean_shift,
+
+        "standardized_shift":
+            standardized_shift,
+
+        "volatility_ratio":
+            volatility_ratio,
+
+        "recent_mean":
+            recent_mean,
+
+        "baseline_mean":
+            baseline_mean,
+
+        "recent_std":
+            recent_std,
+
+        "baseline_std":
+            baseline_std
+    }
+
+
+# ============================================================
+# 4. STREAMING QUIET SHIFT DETECTION
+# ============================================================
+
+def run_streaming_change_detection(data):
+
+    print("\n[3] BAYESIAN QUIET-SHIFT DETECTION")
+
+    print(
+        f"    Baseline window  : "
+        f"{BASELINE_WINDOW} observations"
+    )
+
+    print(
+        f"    Detection window : "
+        f"{DETECTION_WINDOW} observations"
+    )
+
+    print(
+        f"    Watch threshold  : "
+        f"{WATCH_THRESHOLD}"
+    )
+
+    print(
+        f"    Change threshold : "
+        f"{CHANGE_THRESHOLD}"
+    )
+
+    print(
+        f"    Persistence      : "
+        f"{PERSISTENCE_REQUIRED} observations"
+    )
+
+    values = (
+        data[TARGET]
+        .values
+    )
+
+    timestamps = (
+        data["timestamp"]
+        .values
+    )
+
+    persistence_count = 0
+
+    first_genuine_change = None
+
+    detection_history = []
+
+    start_index = (
+        BASELINE_WINDOW
+        +
+        DETECTION_WINDOW
+    )
+
+    previous_state = None
+
+    # --------------------------------------------------------
+    # Sequential replay
+    # --------------------------------------------------------
+
+    for i in range(
+        start_index,
+        len(values)
+    ):
+
+        current_values = (
+            values[:i + 1]
+        )
+
+        evidence = (
+            calculate_change_probability(
+                current_values
+            )
+        )
+
+        probability = (
+            evidence["probability"]
+        )
+
+        # ----------------------------------------------------
+        # Decision
+        # ----------------------------------------------------
+
+        if probability >= CHANGE_THRESHOLD:
+
+            persistence_count += 1
+
+            if (
+                persistence_count
+                >= PERSISTENCE_REQUIRED
+            ):
+
+                state = "GENUINE CHANGE"
+
+                if (
+                    first_genuine_change
+                    is None
+                ):
+
+                    first_genuine_change = {
+
+                        "index": i,
+
+                        "timestamp":
+                            timestamps[i],
+
+                        **evidence,
+
+                        "persistence":
+                            persistence_count
+                    }
+
+            else:
+
+                state = "WATCH"
+
+        elif (
+            probability
+            >= WATCH_THRESHOLD
+        ):
+
+            persistence_count = 0
+
+            state = "WATCH"
+
+        else:
+
+            persistence_count = 0
+
+            state = "NORMAL"
+
+        # ----------------------------------------------------
+        # Save history
+        # ----------------------------------------------------
+
+        detection_history.append({
+
+            "index": i,
+
+            "timestamp":
+                timestamps[i],
+
+            "probability":
+                probability,
+
+            "state":
+                state,
+
+            "persistence":
+                persistence_count,
+
+            "mean_shift":
+                evidence["mean_shift"],
+
+            "volatility_ratio":
+                evidence["volatility_ratio"]
+        })
+
+        # ----------------------------------------------------
+        # Terminal explanation
+        # ----------------------------------------------------
+
+        if state != previous_state:
+
+            print(
+                f"\n    {pd.Timestamp(timestamps[i]).date()} "
+                f"→ {state}"
+            )
+
+            print(
+                f"       P(change)       = "
+                f"{probability:.3f}"
+            )
+
+            print(
+                f"       Mean shift      = "
+                f"{evidence['mean_shift']:.3f}"
+            )
+
+            print(
+                f"       Volatility ratio = "
+                f"{evidence['volatility_ratio']:.3f}"
+            )
+
+            print(
+                f"       Persistence     = "
+                f"{persistence_count}/"
+                f"{PERSISTENCE_REQUIRED}"
+            )
+
+        previous_state = state
+
+    # --------------------------------------------------------
+    # Final detection report
+    # --------------------------------------------------------
+
+    print(
+        "\n    ---------------------------------------"
+    )
+
+    if first_genuine_change is not None:
+
+        print(
+            "    FIRST GENUINE CHANGE DETECTED"
+        )
+
+        print(
+            f"    Timestamp        : "
+            f"{pd.Timestamp(first_genuine_change['timestamp']).date()}"
+        )
+
+        print(
+            f"    Probability      : "
+            f"{first_genuine_change['probability']:.3f}"
+        )
+
+        print(
+            f"    Mean shift       : "
+            f"{first_genuine_change['mean_shift']:.3f}"
+        )
+
+        print(
+            f"    Volatility ratio : "
+            f"{first_genuine_change['volatility_ratio']:.3f}"
+        )
+
+        print(
+            "\n    WHY WAS THIS NOT TREATED AS NOISE?"
+        )
+
+        print(
+            "    AERIS waited for persistent evidence"
+        )
+
+        print(
+            "    instead of reacting to a single point."
+        )
+
+    else:
+
+        print(
+            "    No genuine persistent change confirmed."
+        )
+
+        print(
+            "    Isolated fluctuations were ignored."
+        )
+
+    return {
+
+        "history":
+            detection_history,
+
+        "first_change":
+            first_genuine_change
+    }
+
+
+# ============================================================
+# 5. REGIME DETECTION
+# ============================================================
+
+def detect_regime(
+    values,
+    change_probability
+):
+
+    print("\n[4] REGIME DETECTION")
+
+    values = np.asarray(values)
+
+    recent = (
+        values[-DETECTION_WINDOW:]
+    )
+
+    baseline = (
+        values[-BASELINE_WINDOW:]
+    )
+
+    recent_mean = np.mean(
+        recent
+    )
+
+    baseline_mean = np.mean(
+        baseline
+    )
+
+    recent_std = np.std(
+        recent
+    )
+
+    baseline_std = np.std(
+        baseline
+    )
+
+    if baseline_std < 1e-6:
+
+        baseline_std = 1e-6
+
+    mean_shift = (
+        recent_mean
+        -
+        baseline_mean
+    )
+
+    volatility_ratio = (
+        recent_std
+        /
+        baseline_std
+    )
+
+    print(
+        f"    Recent mean      : "
+        f"{recent_mean:.3f}"
+    )
+
+    print(
+        f"    Baseline mean    : "
+        f"{baseline_mean:.3f}"
+    )
+
+    print(
+        f"    Mean shift       : "
+        f"{mean_shift:.3f}"
+    )
+
+    print(
+        f"    Volatility ratio : "
+        f"{volatility_ratio:.3f}"
+    )
+
+    # --------------------------------------------------------
+    # Infer regime from observed behaviour
+    # --------------------------------------------------------
+
+    if (
+        mean_shift > 2
+        and change_probability >= 0.50
+    ):
+
+        regime = "Peak Shock"
+
+    elif (
+        change_probability
+        >= CHANGE_THRESHOLD
+    ):
+
+        regime = "Structural Shift"
+
+    elif (
+        volatility_ratio
+        > 1.50
+    ):
+
+        regime = "High Variability"
+
+    else:
+
+        regime = "Normal Demand"
+
+    print(
+        f"    CURRENT REGIME   : "
+        f"{regime}"
+    )
+
+    return {
+
+        "regime":
+            regime,
+
+        "mean_shift":
+            mean_shift,
+
+        "volatility_ratio":
+            volatility_ratio
+    }
+
+
+# ============================================================
+# 6. DYNAMIC MODEL ROUTER
+# ============================================================
+
+def model_router(data):
+
+    print("\n[5] DYNAMIC MODEL ROUTING")
+
+    features = [
+
+        "lag_1",
+
+        "lag_7",
+
+        "lag_14",
+
+        "rolling_mean_7",
+
+        "rolling_std_7",
+
+        "day_of_week",
+
+        "month"
+    ]
+
+    X = data[features]
+
+    y = data[TARGET]
+
+    validation_size = 20
+
+    X_train = (
+        X.iloc[:-validation_size]
+    )
+
+    y_train = (
+        y.iloc[:-validation_size]
+    )
+
+    X_test = (
+        X.iloc[-validation_size:]
+    )
+
+    y_test = (
+        y.iloc[-validation_size:]
+    )
+
+    # ========================================================
+    # MODEL 1 — LINEAR REGRESSION
+    # ========================================================
+
+    linear_model = (
+        LinearRegression()
+    )
+
+    linear_model.fit(
+        X_train,
+        y_train
+    )
+
+    linear_predictions = (
+        linear_model.predict(
+            X_test
+        )
+    )
+
+    linear_mae = (
+        mean_absolute_error(
+            y_test,
+            linear_predictions
+        )
+    )
+
+    print(
+        f"    Linear Regression MAE : "
+        f"{linear_mae:.4f}"
+    )
+
+    # ========================================================
+    # MODEL 2 — ADAPTIVE BASELINE
+    # ========================================================
+
+    baseline_value = (
+        y_train.iloc[-7:].mean()
+    )
+
+    baseline_predictions = (
+        np.repeat(
+            baseline_value,
+            validation_size
+        )
+    )
+
+    baseline_mae = (
+        mean_absolute_error(
+            y_test,
+            baseline_predictions
+        )
+    )
+
+    print(
+        f"    Adaptive Baseline MAE  : "
+        f"{baseline_mae:.4f}"
+    )
+
+    # ========================================================
+    # ROUTING DECISION
+    # ========================================================
+
+    if (
+        linear_mae
+        <=
+        baseline_mae
+    ):
+
+        selected_model = (
+            "Linear Regression"
+        )
+
+        final_model = (
+            LinearRegression()
+        )
+
+        final_model.fit(
+            X,
+            y
+        )
+
+        latest_X = (
+            X.iloc[[-1]]
+        )
+
+        forecast = float(
+            final_model.predict(
+                latest_X
+            )[0]
+        )
+
+    else:
+
+        selected_model = (
+            "Adaptive Baseline"
+        )
+
+        forecast = float(
+            y.iloc[-7:].mean()
+        )
+
+    print(
+        f"    SELECTED MODEL       : "
+        f"{selected_model}"
+    )
+
+    print(
+        f"    FORECAST             : "
+        f"{forecast:.3f}"
+    )
+
+    return {
+
+        "selected_model":
+            selected_model,
+
+        "forecast":
+            forecast,
+
+        "linear_mae":
+            linear_mae,
+
+        "baseline_mae":
+            baseline_mae
+    }
+
+
+# ============================================================
+# 7. ADAPTIVE CONFORMAL PREDICTION
+# ============================================================
+
+def adaptive_conformal(
+    data,
+    forecast
+):
+
+    print(
+        "\n[6] ADAPTIVE CONFORMAL PREDICTION"
+    )
+
+    values = (
+        data[TARGET]
+        .values
+    )
+
+    errors = []
+
+    start = max(
+        7,
+        len(values) - 60
+    )
+
+    # --------------------------------------------------------
+    # Historical one-step errors
+    # --------------------------------------------------------
+
+    for i in range(
+        start,
+        len(values)
+    ):
+
+        if i < 7:
+            continue
+
+        actual = (
+            values[i]
+        )
+
+        previous_values = (
+            values[i - 7:i]
+        )
+
+        prediction = (
+            np.mean(
+                previous_values
+            )
+        )
+
+        error = abs(
+            actual
+            -
+            prediction
+        )
+
+        errors.append(
+            error
+        )
+
+    errors = np.asarray(
+        errors
+    )
+
+    if len(errors) == 0:
+
+        adaptive_radius = np.std(
+            values
+        )
+
+    else:
+
+        conformal_quantile = (
+            np.quantile(
+                errors,
+                COVERAGE_LEVEL
+            )
+        )
+
+        recent_volatility = (
+            np.std(
+                values[-14:]
+            )
+        )
+
+        # Adapt interval width to recent behaviour
+        adaptive_radius = (
+            0.70
+            *
+            conformal_quantile
+            +
+            0.30
+            *
+            recent_volatility
+        )
+
+    lower = (
+        forecast
+        -
+        adaptive_radius
+    )
+
+    upper = (
+        forecast
+        +
+        adaptive_radius
+    )
+
+    print(
+        f"    Target coverage    : "
+        f"{COVERAGE_LEVEL * 100:.0f}%"
+    )
+
+    print(
+        f"    Calibration errors : "
+        f"{len(errors)}"
+    )
+
+    print(
+        f"    Adaptive radius    : "
+        f"{adaptive_radius:.3f}"
+    )
+
+    print(
+        f"    Prediction interval: "
+        f"{lower:.3f} → {upper:.3f}"
+    )
+
+    return {
+
+        "lower":
+            lower,
+
+        "upper":
+            upper,
+
+        "radius":
+            adaptive_radius,
+
+        "coverage":
+            COVERAGE_LEVEL
+    }
+
+
+# ============================================================
+# 8. CONFIDENCE SCORE
+# ============================================================
+
+def calculate_confidence(
+    change_probability,
+    regime,
+    model_mae,
+    interval_radius,
+    forecast
+):
+
+    # Stability
+    stability = (
+        1
+        -
+        change_probability
+    )
+
+    # Regime reliability
+    regime_scores = {
+
+        "Normal Demand":
+            1.00,
+
+        "High Variability":
+            0.70,
+
+        "Peak Shock":
+            0.50,
+
+        "Structural Shift":
+            0.55
+    }
+
+    regime_component = (
+        regime_scores.get(
+            regime,
+            0.50
+        )
+    )
+
+    # Forecast accuracy
+    scale = max(
+        abs(forecast),
+        1.0
+    )
+
+    accuracy_component = (
+        1
+        /
+        (
+            1
+            +
+            model_mae / scale
+        )
+    )
+
+    # Uncertainty
+    uncertainty_component = (
+        1
+        /
+        (
+            1
+            +
+            interval_radius / scale
+        )
+    )
+
+    score = (
+
+        0.35
+        *
+        stability
+
+        +
+
+        0.25
+        *
+        regime_component
+
+        +
+
+        0.25
+        *
+        accuracy_component
+
+        +
+
+        0.15
+        *
+        uncertainty_component
+    )
+
+    confidence_score = float(
+        np.clip(
+            score * 100,
+            0,
+            100
+        )
+    )
+
+    if confidence_score >= 75:
+
+        label = "HIGH"
+
+    elif confidence_score >= 50:
+
+        label = "MODERATE"
+
+    else:
+
+        label = "LOW"
+
+    return (
+        confidence_score,
+        label
+    )
+
+
+# ============================================================
+# 9. GRAPHICAL GUI
+# ============================================================
+
+def show_dashboard(result):
+
+    root = tk.Tk()
+
+    root.title(
+        "AERIS — Adaptive Electricity Forecasting"
+    )
+
+    root.geometry(
+        "1250x900"
+    )
+
+    root.configure(
+        bg="#0b0f16"
+    )
+
+    # ========================================================
+    # COLOURS
+    # ========================================================
+
+    BG = "#0b0f16"
+    CARD = "#151b26"
+    CARD2 = "#1d2735"
+
+    TEXT = "#f8fafc"
+    MUTED = "#94a3b8"
+
+    BLUE = "#38bdf8"
+    GREEN = "#22c55e"
+    YELLOW = "#f59e0b"
+    RED = "#ef4444"
+    PURPLE = "#a78bfa"
+
+    LINE = "#334155"
+
+    # ========================================================
+    # HEADER
+    # ========================================================
+
+    header = tk.Frame(
+        root,
+        bg=BG
+    )
+
+    header.pack(
+        fill="x",
+        padx=30,
+        pady=(18, 4)
+    )
+
+    tk.Label(
+        header,
+        text="AERIS",
+        font=(
+            "Segoe UI",
+            28,
+            "bold"
+        ),
+        fg=TEXT,
+        bg=BG
+    ).pack(
+        anchor="w"
+    )
+
+    tk.Label(
+        header,
+        text=(
+            "Adaptive Electricity Regime "
+            "Intelligence System"
+        ),
+        font=(
+            "Segoe UI",
+            11
+        ),
+        fg=MUTED,
+        bg=BG
+    ).pack(
+        anchor="w"
+    )
+
+    # ========================================================
+    # STATUS
+    # ========================================================
+
+    status_frame = tk.Frame(
+        root,
+        bg=CARD,
+        highlightbackground=LINE,
+        highlightthickness=1
+    )
+
+    status_frame.pack(
+        fill="x",
+        padx=30,
+        pady=10
+    )
+
+    if result["genuine_change"]:
+
+        status_text = (
+            "GENUINE CHANGE DETECTED"
+        )
+
+        status_detail = (
+            "Persistent evidence detected — "
+            "AERIS can adapt"
+        )
+
+    elif (
+        result["change_probability"]
+        >= WATCH_THRESHOLD
+    ):
+
+        status_text = "WATCH"
+
+        status_detail = (
+            "Evidence is accumulating — "
+            "AERIS continues monitoring"
+        )
+
+    else:
+
+        status_text = "SYSTEM STABLE"
+
+        status_detail = (
+            "No persistent structural "
+            "change detected"
+        )
+
+    tk.Label(
+        status_frame,
+        text=status_text,
+        font=(
+            "Segoe UI",
+            16,
+            "bold"
+        ),
+        fg=TEXT,
+        bg=CARD
+    ).pack(
+        pady=(10, 1)
+    )
+
+    tk.Label(
+        status_frame,
+        text=status_detail,
+        font=(
+            "Segoe UI",
+            9
+        ),
+        fg=MUTED,
+        bg=CARD
+    ).pack(
+        pady=(0, 10)
+    )
+
+    # ========================================================
+    # SCROLLABLE CANVAS
+    # ========================================================
+
+    outer = tk.Frame(
+        root,
+        bg=BG
+    )
+
+    outer.pack(
+        fill="both",
+        expand=True,
+        padx=20
+    )
+
+    canvas = tk.Canvas(
+        outer,
+        bg=BG,
+        highlightthickness=0
+    )
+
+    scrollbar = tk.Scrollbar(
+        outer,
+        orient="vertical",
+        command=canvas.yview
+    )
+
+    canvas.configure(
+        yscrollcommand=scrollbar.set
+    )
+
+    scrollbar.pack(
+        side="right",
+        fill="y"
+    )
+
+    canvas.pack(
+        side="left",
+        fill="both",
+        expand=True
+    )
+
+    content = tk.Frame(
+        canvas,
+        bg=BG
+    )
+
+    canvas_window = canvas.create_window(
+        (0, 0),
+        window=content,
+        anchor="nw"
+    )
+
+    def resize_content(event):
+
+        canvas.itemconfig(
+            canvas_window,
+            width=event.width
+        )
+
+    canvas.bind(
+        "<Configure>",
+        resize_content
+    )
+
+    content.bind(
+        "<Configure>",
+        lambda e:
+        canvas.configure(
+            scrollregion=
+            canvas.bbox("all")
+        )
+    )
+
+    # ========================================================
+    # SECTION TITLE
+    # ========================================================
+
+    def section_title(
+        number,
+        title,
+        subtitle
+    ):
+
+        frame = tk.Frame(
+            content,
+            bg=BG
+        )
+
+        frame.pack(
+            fill="x",
+            padx=15,
+            pady=(15, 7)
+        )
+
+        tk.Label(
+            frame,
+            text=f"{number}. {title}",
+            font=(
+                "Segoe UI",
+                12,
+                "bold"
+            ),
+            fg=TEXT,
+            bg=BG
+        ).pack(
+            anchor="w"
+        )
+
+        tk.Label(
+            frame,
+            text=subtitle,
+            font=(
+                "Segoe UI",
+                8
+            ),
+            fg=MUTED,
+            bg=BG
+        ).pack(
+            anchor="w"
+        )
+
+    # ========================================================
+    # 1. DEMAND GRAPH
+    # ========================================================
+
+    section_title(
+        "01",
+        "DEMAND BEHAVIOUR",
+        "Historical demand stream monitored sequentially"
+    )
+
+    graph = tk.Canvas(
+        content,
+        height=230,
+        bg=CARD,
+        highlightbackground=LINE,
+        highlightthickness=1
+    )
+
+    graph.pack(
+        fill="x",
+        padx=15,
+        pady=(0, 10)
+    )
+
+    try:
+
+        graph_df = pd.read_excel(
+            FILE
+        )
+
+        graph_df["timestamp"] = (
+            pd.to_datetime(
+                graph_df["timestamp"]
+            )
+        )
+
+        graph_df = (
+            graph_df
+            .sort_values("timestamp")
+        )
+
+        graph_values = (
+            graph_df[TARGET]
+            .dropna()
+            .values
+        )
+
+    except Exception:
+
+        graph_values = np.array([])
+
+    if len(graph_values) > 0:
+
+        graph_values = (
+            graph_values[-120:]
+        )
+
+        left = 35
+        right = 1160
+        top = 30
+        bottom = 190
+
+        vmin = float(
+            np.min(graph_values)
+        )
+
+        vmax = float(
+            np.max(graph_values)
+        )
+
+        if vmax == vmin:
+            vmax += 1
+
+        points = []
+
+        for i, value in enumerate(
+            graph_values
+        ):
+
+            x = (
+                left
+                +
+                i
+                *
+                (
+                    (right - left)
+                    /
+                    max(
+                        len(graph_values) - 1,
+                        1
+                    )
+                )
+            )
+
+            y = (
+                bottom
+                -
+                (
+                    (value - vmin)
+                    /
+                    (vmax - vmin)
+                )
+                *
+                (bottom - top)
+            )
+
+            points.extend(
+                [x, y]
+            )
+
+        if len(points) >= 4:
+
+            graph.create_line(
+                *points,
+                fill=BLUE,
+                width=3,
+                smooth=True
+            )
+
+        graph.create_text(
+            left,
+            12,
+            text="DEMAND",
+            anchor="w",
+            fill=MUTED,
+            font=(
+                "Segoe UI",
+                8,
+                "bold"
+            )
+        )
+
+        graph.create_text(
+            right,
+            12,
+            text="Recent →",
+            anchor="e",
+            fill=MUTED,
+            font=(
+                "Segoe UI",
+                8
+            )
+        )
+
+        graph.create_text(
+            left,
+            bottom + 15,
+            text=f"{vmin:.1f}",
+            anchor="w",
+            fill=MUTED,
+            font=(
+                "Segoe UI",
+                8
+            )
+        )
+
+        graph.create_text(
+            left,
+            top - 5,
+            text=f"{vmax:.1f}",
+            anchor="w",
+            fill=MUTED,
+            font=(
+                "Segoe UI",
+                8
+            )
+        )
+
+    # ========================================================
+    # 2. BAYESIAN DETECTOR
+    # ========================================================
+
+    section_title(
+        "02",
+        "BAYESIAN QUIET-SHIFT DETECTOR",
+        "Compare recent behaviour against the historical baseline"
+    )
+
+    detector = tk.Canvas(
+        content,
+        height=210,
+        bg=CARD,
+        highlightbackground=LINE,
+        highlightthickness=1
+    )
+
+    detector.pack(
+        fill="x",
+        padx=15,
+        pady=(0, 10)
+    )
+
+    # --------------------------------------------------------
+    # Baseline → Detection window diagram
+    # --------------------------------------------------------
+
+    detector.create_text(
+        40,
+        35,
+        text="BASELINE",
+        fill=MUTED,
+        font=(
+            "Segoe UI",
+            9,
+            "bold"
+        )
+    )
+
+    detector.create_text(
+        580,
+        35,
+        text="RECENT WINDOW",
+        fill=MUTED,
+        font=(
+            "Segoe UI",
+            9,
+            "bold"
+        )
+    )
+
+    detector.create_rectangle(
+        40,
+        55,
+        530,
+        105,
+        fill=CARD2,
+        outline=LINE
+    )
+
+    detector.create_rectangle(
+        580,
+        55,
+        850,
+        105,
+        fill=CARD2,
+        outline=LINE
+    )
+
+    detector.create_text(
+        285,
+        80,
+        text=(
+            f"{BASELINE_WINDOW} observations"
+        ),
+        fill=TEXT,
+        font=(
+            "Segoe UI",
+            10,
+            "bold"
+        )
+    )
+
+    detector.create_text(
+        715,
+        80,
+        text=(
+            f"{DETECTION_WINDOW} observations"
+        ),
+        fill=TEXT,
+        font=(
+            "Segoe UI",
+            10,
+            "bold"
+        )
+    )
+
+    detector.create_text(
+        1000,
+        80,
+        text="→",
+        fill=PURPLE,
+        font=(
+            "Segoe UI",
+            28,
+            "bold"
+        )
+    )
+
+    detector.create_text(
+        1100,
+        80,
+        text="EVIDENCE",
+        fill=TEXT,
+        font=(
+            "Segoe UI",
+            10,
+            "bold"
+        )
+    )
+
+    # --------------------------------------------------------
+    # Probability bar
+    # --------------------------------------------------------
+
+    probability = (
+        result["change_probability"]
+    )
+
+    bar_x1 = 40
+    bar_x2 = 1160
+    bar_y = 135
+
+    detector.create_rectangle(
+        bar_x1,
+        bar_y,
+        bar_x2,
+        bar_y + 22,
+        fill="#273244",
+        outline=""
+    )
+
+    detector.create_rectangle(
+        bar_x1,
+        bar_y,
+        bar_x1
+        +
+        (
+            bar_x2 - bar_x1
+        )
+        *
+        probability,
+        bar_y + 22,
+        fill=(
+            RED
+            if probability
+            >= CHANGE_THRESHOLD
+            else YELLOW
+        ),
+        outline=""
+    )
+
+    watch_x = (
+        bar_x1
+        +
+        (
+            bar_x2 - bar_x1
+        )
+        *
+        WATCH_THRESHOLD
+    )
+
+    change_x = (
+        bar_x1
+        +
+        (
+            bar_x2 - bar_x1
+        )
+        *
+        CHANGE_THRESHOLD
+    )
+
+    detector.create_line(
+        watch_x,
+        bar_y - 8,
+        watch_x,
+        bar_y + 30,
+        fill=YELLOW,
+        dash=(4, 3)
+    )
+
+    detector.create_line(
+        change_x,
+        bar_y - 8,
+        change_x,
+        bar_y + 30,
+        fill=RED,
+        dash=(4, 3)
+    )
+
+    detector.create_text(
+        watch_x,
+        bar_y - 12,
+        text="WATCH",
+        fill=YELLOW,
+        font=(
+            "Segoe UI",
+            7,
+            "bold"
+        )
+    )
+
+    detector.create_text(
+        change_x,
+        bar_y - 12,
+        text="CHANGE",
+        fill=RED,
+        font=(
+            "Segoe UI",
+            7,
+            "bold"
+        )
+    )
+
+    detector.create_text(
+        600,
+        180,
+        text=(
+            f"Posterior change probability = "
+            f"{probability:.3f}"
+        ),
+        fill=TEXT,
+        font=(
+            "Segoe UI",
+            10,
+            "bold"
+        )
+    )
+
+    # ========================================================
+    # 3. FOUR-STAGE PIPELINE
+    # ========================================================
+
+    section_title(
+        "03",
+        "AERIS DECISION ENGINE",
+        "The system does not jump directly from error → retraining"
+    )
+
+    pipeline = tk.Canvas(
+        content,
+        height=220,
+        bg=CARD,
+        highlightbackground=LINE,
+        highlightthickness=1
+    )
+
+    pipeline.pack(
+        fill="x",
+        padx=15,
+        pady=(0, 10)
+    )
+
+    pipeline_boxes = [
+
+        (
+            25,
+            "DETECT",
+            "Bayesian\nChange Point",
+            f"P = {probability:.2f}",
+            BLUE
+        ),
+
+        (
+            310,
+            "UNDERSTAND",
+            "Regime\nDetection",
+            result["regime"],
+            PURPLE
+        ),
+
+        (
+            595,
+            "ROUTE",
+            "Dynamic\nModel Router",
+            result["selected_model"],
+            GREEN
+        ),
+
+        (
+            880,
+            "QUANTIFY",
+            "Adaptive\nConformal",
+            f"{result['coverage'] * 100:.0f}% interval",
+            YELLOW
+        )
+    ]
+
+    box_y1 = 45
+    box_y2 = 160
+    box_width = 230
+
+    for i, (
+        x,
+        title,
+        subtitle,
+        value,
+        accent
+    ) in enumerate(
+        pipeline_boxes
+    ):
+
+        pipeline.create_rectangle(
+            x,
+            box_y1,
+            x + box_width,
+            box_y2,
+            fill=CARD2,
+            outline=accent,
+            width=2
+        )
+
+        pipeline.create_text(
+            x + box_width / 2,
+            box_y1 + 20,
+            text=title,
+            fill=accent,
+            font=(
+                "Segoe UI",
+                10,
+                "bold"
+            )
+        )
+
+        pipeline.create_text(
+            x + box_width / 2,
+            box_y1 + 52,
+            text=subtitle,
+            fill=MUTED,
+            font=(
+                "Segoe UI",
+                9
+            ),
+            justify="center"
+        )
+
+        pipeline.create_text(
+            x + box_width / 2,
+            box_y1 + 94,
+            text=value,
+            fill=TEXT,
+            font=(
+                "Segoe UI",
+                9,
+                "bold"
+            ),
+            width=210
+        )
+
+        if i < 3:
+
+            pipeline.create_text(
+                x + box_width + 25,
+                102,
+                text="→",
+                fill=MUTED,
+                font=(
+                    "Segoe UI",
+                    20,
+                    "bold"
+                )
+            )
+
+    # ========================================================
+    # 4. WHY IS IT A REAL CHANGE?
+    # ========================================================
+
+    section_title(
+        "04",
+        "QUIET-SHIFT REASONING",
+        "How AERIS separates genuine change from ordinary fluctuation"
+    )
+
+    reasoning = tk.Canvas(
+        content,
+        height=190,
+        bg=CARD,
+        highlightbackground=LINE,
+        highlightthickness=1
+    )
+
+    reasoning.pack(
+        fill="x",
+        padx=15,
+        pady=(0, 10)
+    )
+
+    steps = [
+
+        (
+            "01",
+            "OBSERVE",
+            f"Read {DETECTION_WINDOW} recent observations"
+        ),
+
+        (
+            "02",
+            "COMPARE",
+            f"Compare against {BASELINE_WINDOW}-observation baseline"
+        ),
+
+        (
+            "03",
+            "PERSIST",
+            f"Require {PERSISTENCE_REQUIRED} consecutive strong signals"
+        ),
+
+        (
+            "04",
+            "ADAPT",
+            "Only then trigger adaptation"
+        )
+    ]
+
+    for i, (
+        number,
+        title,
+        description
+    ) in enumerate(
+        steps
+    ):
+
+        x = (
+            40
+            +
+            i * 285
+        )
+
+        reasoning.create_oval(
+            x,
+            35,
+            x + 42,
+            77,
+            fill=CARD2,
+            outline=BLUE
+        )
+
+        reasoning.create_text(
+            x + 21,
+            56,
+            text=number,
+            fill=TEXT,
+            font=(
+                "Segoe UI",
+                8,
+                "bold"
+            )
+        )
+
+        reasoning.create_text(
+            x + 55,
+            43,
+            text=title,
+            anchor="w",
+            fill=TEXT,
+            font=(
+                "Segoe UI",
+                9,
+                "bold"
+            )
+        )
+
+        reasoning.create_text(
+            x + 55,
+            67,
+            text=description,
+            anchor="w",
+            fill=MUTED,
+            font=(
+                "Segoe UI",
+                8
+            ),
+            width=210
+        )
+
+        if i < 3:
+
+            reasoning.create_line(
+                x + 235,
+                56,
+                x + 270,
+                56,
+                fill=LINE,
+                width=2
+            )
+
+    # --------------------------------------------------------
+    # Evidence values
+    # --------------------------------------------------------
+
+    evidence_y = 125
+
+    first_change = (
+        result["first_change"]
+    )
+
+    if first_change is not None:
+
+        evidence_text = (
+            "FIRST REAL CHANGE: "
+            +
+            str(
+                pd.Timestamp(
+                    first_change["timestamp"]
+                ).date()
+            )
+            +
+            "     |     "
+            "P(change) = "
+            +
+            f"{first_change['probability']:.3f}"
+            +
+            "     |     "
+            "Mean shift = "
+            +
+            f"{first_change['mean_shift']:.3f}"
+        )
+
+    else:
+
+        evidence_text = (
+            "NO PERSISTENT CHANGE CONFIRMED — "
+            "isolated fluctuations were not enough"
+        )
+
+    reasoning.create_text(
+        40,
+        evidence_y,
+        text=evidence_text,
+        anchor="w",
+        fill=TEXT,
+        font=(
+            "Segoe UI",
+            9,
+            "bold"
+        )
+    )
+
+    # ========================================================
+    # 5. MODEL ROUTING VISUAL
+    # ========================================================
+
+    section_title(
+        "05",
+        "MODEL ROUTING",
+        "AERIS compares recent validation performance instead of hard-coding a model"
+    )
+
+    model_canvas = tk.Canvas(
+        content,
+        height=180,
+        bg=CARD,
+        highlightbackground=LINE,
+        highlightthickness=1
+    )
+
+    model_canvas.pack(
+        fill="x",
+        padx=15,
+        pady=(0, 10)
+    )
+
+    linear_mae = (
+        result["linear_mae"]
+    )
+
+    baseline_mae = (
+        result["baseline_mae"]
+    )
+
+    max_mae = max(
+        linear_mae,
+        baseline_mae,
+        1
+    )
+
+    models = [
+
+        (
+            "Linear Regression",
+            linear_mae,
+            BLUE
+        ),
+
+        (
+            "Adaptive Baseline",
+            baseline_mae,
+            PURPLE
+        )
+    ]
+
+    for i, (
+        name,
+        mae,
+        accent
+    ) in enumerate(
+        models
+    ):
+
+        y = 35 + i * 55
+
+        model_canvas.create_text(
+            40,
+            y + 12,
+            text=name,
+            anchor="w",
+            fill=TEXT,
+            font=(
+                "Segoe UI",
+                9,
+                "bold"
+            )
+        )
+
+        bar_start = 220
+        bar_end = 900
+
+        model_canvas.create_rectangle(
+            bar_start,
+            y,
+            bar_end,
+            y + 25,
+            fill="#273244",
+            outline=""
+        )
+
+        width = (
+            bar_end
+            -
+            bar_start
+        ) * (
+            mae / max_mae
+        )
+
+        model_canvas.create_rectangle(
+            bar_start,
+            y,
+            bar_start + width,
+            y + 25,
+            fill=accent,
+            outline=""
+        )
+
+        model_canvas.create_text(
+            950,
+            y + 12,
+            text=f"MAE = {mae:.3f}",
+            anchor="w",
+            fill=TEXT,
+            font=(
+                "Segoe UI",
+                9,
+                "bold"
+            )
+        )
+
+    model_canvas.create_text(
+        40,
+        145,
+        text=(
+            f"SELECTED → {result['selected_model']}"
+        ),
+        anchor="w",
+        fill=GREEN,
+        font=(
+            "Segoe UI",
+            10,
+            "bold"
+        )
+    )
+
+    # ========================================================
+    # 6. CONFORMAL INTERVAL VISUAL
+    # ========================================================
+
+    section_title(
+        "06",
+        "ADAPTIVE CONFORMAL UNCERTAINTY",
+        "Forecast + statistically calibrated uncertainty range"
+    )
+
+    conformal = tk.Canvas(
+        content,
+        height=210,
+        bg=CARD,
+        highlightbackground=LINE,
+        highlightthickness=1
+    )
+
+    conformal.pack(
+        fill="x",
+        padx=15,
+        pady=(0, 10)
+    )
+
+    lower = result["lower"]
+    upper = result["upper"]
+    forecast = result["forecast"]
+
+    if upper <= lower:
+        upper = lower + 1
+
+    line_left = 100
+    line_right = 1080
+    line_y = 100
+
+    # Main interval
+    conformal.create_line(
+        line_left,
+        line_y,
+        line_right,
+        line_y,
+        fill=YELLOW,
+        width=16
+    )
+
+    # Forecast location
+    forecast_x = (
+        line_left
+        +
+        (
+            forecast - lower
+        )
+        /
+        (
+            upper - lower
+        )
+        *
+        (
+            line_right - line_left
+        )
+    )
+
+    conformal.create_oval(
+        forecast_x - 10,
+        line_y - 10,
+        forecast_x + 10,
+        line_y + 10,
+        fill=TEXT,
+        outline=""
+    )
+
+    # Lower bound
+    conformal.create_line(
+        line_left,
+        line_y - 25,
+        line_left,
+        line_y + 25,
+        fill=TEXT,
+        width=2
+    )
+
+    conformal.create_text(
+        line_left,
+        145,
+        text=f"LOWER\n{lower:.2f}",
+        fill=MUTED,
+        font=(
+            "Segoe UI",
+            8,
+            "bold"
+        ),
+        justify="center"
+    )
+
+    # Forecast
+    conformal.create_text(
+        forecast_x,
+        45,
+        text=(
+            f"FORECAST\n{forecast:.2f}"
+        ),
+        fill=TEXT,
+        font=(
+            "Segoe UI",
+            9,
+            "bold"
+        ),
+        justify="center"
+    )
+
+    # Upper bound
+    conformal.create_line(
+        line_right,
+        line_y - 25,
+        line_right,
+        line_y + 25,
+        fill=TEXT,
+        width=2
+    )
+
+    conformal.create_text(
+        line_right,
+        145,
+        text=f"UPPER\n{upper:.2f}",
+        fill=MUTED,
+        font=(
+            "Segoe UI",
+            8,
+            "bold"
+        ),
+        justify="center"
+    )
+
+    conformal.create_text(
+        590,
+        180,
+        text=(
+            f"Target coverage = "
+            f"{result['coverage'] * 100:.0f}%"
+            "     |     "
+            f"Adaptive radius = "
+            f"{result['radius']:.3f}"
+        ),
+        fill=MUTED,
+        font=(
+            "Segoe UI",
+            9
+        )
+    )
+
+    # ========================================================
+    # 7. FINAL OUTPUT
+    # ========================================================
+
+    section_title(
+        "07",
+        "FINAL AERIS DECISION",
+        "What the system would provide to the electricity operator"
+    )
+
+    final = tk.Canvas(
+        content,
+        height=210,
+        bg=CARD,
+        highlightbackground=LINE,
+        highlightthickness=1
+    )
+
+    final.pack(
+        fill="x",
+        padx=15,
+        pady=(0, 15)
+    )
+
+    # Forecast
+    final.create_text(
+        55,
+        35,
+        text="FORECAST",
+        anchor="w",
+        fill=MUTED,
+        font=(
+            "Segoe UI",
+            8,
+            "bold"
+        )
+    )
+
+    final.create_text(
+        55,
+        75,
+        text=f"{forecast:.2f}",
+        anchor="w",
+        fill=TEXT,
+        font=(
+            "Segoe UI",
+            28,
+            "bold"
+        )
+    )
+
+    # Confidence
+    final.create_text(
+        300,
+        35,
+        text="CONFIDENCE",
+        anchor="w",
+        fill=MUTED,
+        font=(
+            "Segoe UI",
+            8,
+            "bold"
+        )
+    )
+
+    final.create_text(
+        300,
+        75,
+        text=(
+            f"{result['confidence_score']:.0f}/100"
+        ),
+        anchor="w",
+        fill=TEXT,
+        font=(
+            "Segoe UI",
+            25,
+            "bold"
+        )
+    )
+
+    final.create_text(
+        300,
+        105,
+        text=result["confidence_label"],
+        anchor="w",
+        fill=GREEN,
+        font=(
+            "Segoe UI",
+            9,
+            "bold"
+        )
+    )
+
+    # Regime
+    final.create_text(
+        530,
+        35,
+        text="REGIME",
+        anchor="w",
+        fill=MUTED,
+        font=(
+            "Segoe UI",
+            8,
+            "bold"
+        )
+    )
+
+    final.create_text(
+        530,
+        75,
+        text=result["regime"],
+        anchor="w",
+        fill=TEXT,
+        font=(
+            "Segoe UI",
+            14,
+            "bold"
+        )
+    )
+
+    # Uncertainty
+    final.create_text(
+        830,
+        35,
+        text="UNCERTAINTY",
+        anchor="w",
+        fill=MUTED,
+        font=(
+            "Segoe UI",
+            8,
+            "bold"
+        )
+    )
+
+    final.create_text(
+        830,
+        75,
+        text=result["uncertainty"],
+        anchor="w",
+        fill=TEXT,
+        font=(
+            "Segoe UI",
+            14,
+            "bold"
+        )
+    )
+
+    # Decision
+    decision = (
+        "ADAPT"
+        if result["genuine_change"]
+        else "CONTINUE MONITORING"
+    )
+
+    final.create_text(
+        55,
+        155,
+        text=f"DECISION → {decision}",
+        anchor="w",
+        fill=(
+            RED
+            if result["genuine_change"]
+            else GREEN
+        ),
+        font=(
+            "Segoe UI",
+            11,
+            "bold"
+        )
+    )
+
+    final.create_text(
+        530,
+        155,
+        text=(
+            "DETECT  →  UNDERSTAND  →  "
+            "ROUTE  →  QUANTIFY"
+        ),
+        anchor="w",
+        fill=MUTED,
+        font=(
+            "Segoe UI",
+            9,
+            "bold"
+        )
+    )
+
+    root.mainloop()
+
+
+# ============================================================
+# 10. MAIN PIPELINE
+# ============================================================
+
+def main():
+
+    # ========================================================
+    # DATA
+    # ========================================================
+
+    df = load_data()
+
+    if df is None:
+        return
+
+    # ========================================================
+    # FEATURES
+    # ========================================================
+
+    data = create_features(
+        df
+    )
+
+    if len(data) < 100:
+
+        print(
+            "\nERROR: Not enough observations."
+        )
+
+        return
+
+    # ========================================================
+    # MODULE 1
+    # CHANGE DETECTION
+    # ========================================================
+
+    detection = (
+        run_streaming_change_detection(
+            data
+        )
+    )
+
+    history = (
+        detection["history"]
+    )
+
+    first_change = (
+        detection["first_change"]
+    )
+
+    if history:
+
+        latest = history[-1]
+
+        change_probability = (
+            latest["probability"]
+        )
+
+    else:
+
+        change_probability = 0.0
+
+    # ========================================================
+    # MODULE 2
+    # REGIME DETECTION
+    # ========================================================
+
+    regime_result = (
+        detect_regime(
+            data[TARGET].values,
+            change_probability
+        )
+    )
+
+    # ========================================================
+    # MODULE 3
+    # MODEL ROUTING
+    # ========================================================
+
+    model_result = (
+        model_router(
+            data
+        )
+    )
+
+    # ========================================================
+    # MODULE 4
+    # ADAPTIVE CONFORMAL
+    # ========================================================
+
+    conformal_result = (
+        adaptive_conformal(
+            data,
+            model_result["forecast"]
+        )
+    )
+
+    # ========================================================
+    # CONFIDENCE
+    # ========================================================
+
+    confidence_score, confidence_label = (
+        calculate_confidence(
+
+            change_probability,
+
+            regime_result["regime"],
+
+            min(
+                model_result["linear_mae"],
+                model_result["baseline_mae"]
+            ),
+
+            conformal_result["radius"],
+
+            model_result["forecast"]
+        )
+    )
+
+    # ========================================================
+    # UNCERTAINTY LEVEL
+    # ========================================================
+
+    interval_width = (
+        conformal_result["upper"]
+        -
+        conformal_result["lower"]
+    )
+
+    forecast_scale = max(
+        abs(
+            model_result["forecast"]
+        ),
+        1.0
+    )
+
+    relative_width = (
+        interval_width
+        /
+        forecast_scale
+    )
+
+    if relative_width < 0.25:
+
+        uncertainty = "LOW"
+
+    elif relative_width < 0.50:
+
+        uncertainty = "MODERATE"
+
+    else:
+
+        uncertainty = "HIGH"
+
+    # ========================================================
+    # RESULT OBJECT
+    # ========================================================
+
+    result = {
+
+        "forecast":
+            model_result["forecast"],
+
+        "lower":
+            conformal_result["lower"],
+
+        "upper":
+            conformal_result["upper"],
+
+        "radius":
+            conformal_result["radius"],
+
+        "coverage":
+            conformal_result["coverage"],
+
+        "change_probability":
+            change_probability,
+
+        "regime":
+            regime_result["regime"],
+
+        "selected_model":
+            model_result["selected_model"],
+
+        "linear_mae":
+            model_result["linear_mae"],
+
+        "baseline_mae":
+            model_result["baseline_mae"],
+
+        "confidence_score":
+            confidence_score,
+
+        "confidence_label":
+            confidence_label,
+
+        "uncertainty":
+            uncertainty,
+
+        "detection_history":
+            history,
+
+        "first_change":
+            first_change,
+
+        "genuine_change":
+            first_change is not None
+    }
+
+    # ========================================================
+    # TERMINAL OUTPUT
+    # ========================================================
+
+    print("\n")
+    print("=" * 75)
+    print("                         FINAL AERIS OUTPUT")
+    print("=" * 75)
+
+    print(
+        f"\n    Forecast             : "
+        f"{result['forecast']:.3f}"
+    )
+
+    print(
+        f"    Prediction interval : "
+        f"{result['lower']:.3f}"
+        f" → "
+        f"{result['upper']:.3f}"
+    )
+
+    print(
+        f"    Coverage             : "
+        f"{result['coverage'] * 100:.0f}%"
+    )
+
+    print(
+        f"    Confidence           : "
+        f"{result['confidence_score']:.1f}/100"
+    )
+
+    print(
+        f"    Confidence level     : "
+        f"{result['confidence_label']}"
+    )
+
+    print(
+        f"    Uncertainty          : "
+        f"{result['uncertainty']}"
+    )
+
+    print(
+        f"    Change probability   : "
+        f"{result['change_probability']:.3f}"
+    )
+
+    print(
+        f"    Current regime       : "
+        f"{result['regime']}"
+    )
+
+    print(
+        f"    Selected model       : "
+        f"{result['selected_model']}"
+    )
+
+    # ========================================================
+    # QUIET SHIFT EVIDENCE
+    # ========================================================
+
+    print(
+        "\n" + "-" * 75
+    )
+
+    print(
+        "                         QUIET SHIFT EVIDENCE"
+    )
+
+    print(
+        "-" * 75
+    )
+
+    if first_change is not None:
+
+        print(
+            f"\n    FIRST REAL CHANGE : "
+            f"{pd.Timestamp(first_change['timestamp']).date()}"
+        )
+
+        print(
+            f"    Signal            : "
+            f"Posterior change probability"
+        )
+
+        print(
+            f"    Baseline window   : "
+            f"{BASELINE_WINDOW} observations"
+        )
+
+        print(
+            f"    Detection window  : "
+            f"{DETECTION_WINDOW} observations"
+        )
+
+        print(
+            f"    Threshold         : "
+            f"{CHANGE_THRESHOLD}"
+        )
+
+        print(
+            f"    Persistence       : "
+            f"{PERSISTENCE_REQUIRED} observations"
+        )
+
+        print(
+            f"    Mean shift        : "
+            f"{first_change['mean_shift']:.3f}"
+        )
+
+        print(
+            f"    Volatility ratio  : "
+            f"{first_change['volatility_ratio']:.3f}"
+        )
+
+        print(
+            "\n    DECISION:"
+        )
+
+        print(
+            "    Persistent evidence "
+            "supports a genuine shift."
+        )
+
+    else:
+
+        print(
+            "\n    NO GENUINE SHIFT CONFIRMED."
+        )
+
+        print(
+            "    AERIS did not react to isolated noise."
+        )
+
+    print(
+        "\n" + "=" * 75
+    )
+
+    print(
+        "              DETECT → UNDERSTAND → ROUTE → QUANTIFY"
+    )
+
+    print(
+        "=" * 75
+    )
+
+    # ========================================================
+    # OPEN GRAPHICAL INTERFACE
+    # ========================================================
+
+    show_dashboard(
+        result
+    )
+
+
+# ============================================================
+# START
+# ============================================================
+
+if __name__ == "__main__":
+
+    main()
