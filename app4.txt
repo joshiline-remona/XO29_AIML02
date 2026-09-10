@@ -1,0 +1,4857 @@
+"""
+AERIS - Adaptive Electricity Regime Intelligence System
+Interactive Streamlit Dashboard
+
+EXISTING FEATURES PRESERVED:
+    - AERIS End-to-End Pipeline
+    - Module 1: BOCPD Change Detection
+    - Module 2: Regime Classification
+    - Module 3: Model Routing & Forecasting
+    - Module 4: Conformal Uncertainty
+    - Adaptation Status
+    - Dataset Inspection
+    - Historical Monitoring
+
+ADDED FOR PS2 SURPRISE CHALLENGE:
+    - PS2 Evaluation API
+    - SC1 / SC2 stream sessions
+    - One-step-ahead prediction
+    - Persistent online BOCPD detector
+    - Change verification layer
+    - Temporary disturbance detection
+    - Persistent change confirmation
+    - Frozen pre-change baseline
+    - Adaptive forecasting strategy
+    - Baseline vs Adaptive model routing
+    - Conformal intervals during evaluation
+    - Evaluation history
+    - Error monitoring
+    - Adaptation timeline
+    - Verification timeline
+"""
+
+# ============================================================
+# IMPORTS
+# ============================================================
+
+import os
+
+import streamlit as st
+import pandas as pd
+import numpy as np
+import requests
+import plotly.graph_objects as go
+
+from plotly.subplots import make_subplots
+
+from sklearn.linear_model import LinearRegression, Ridge
+
+from sklearn.ensemble import (
+    GradientBoostingRegressor,
+    RandomForestRegressor
+)
+
+from sklearn.metrics import (
+    mean_absolute_error,
+    mean_squared_error
+)
+
+from module_1_bocpd import (
+    BOCPDConfig,
+    BOCPDDetector,
+    DetectorStatus
+)
+
+from module_2_regime_classification import (
+    RegimeConfig,
+    RuleBasedRegimeClassifier,
+    DemandRegime
+)
+
+from module_4_integration import (
+    AERISPipeline
+)
+
+
+# ============================================================
+# CONSTANTS
+# ============================================================
+
+API_BASE = "https://ps2-eval-server.onrender.com"
+
+API_FEATURES = [
+    "feature_1",
+    "feature_2",
+    "feature_3",
+    "feature_4",
+    "feature_5",
+    "feature_6"
+]
+
+DEFAULT_TRAINING_FILE = "training_set.csv"
+
+# Fallback for your existing local setup
+FALLBACK_TRAINING_FILE = "xo.xlsx"
+
+
+# ============================================================
+# PAGE CONFIG
+# ============================================================
+
+st.set_page_config(
+    page_title="AERIS Dashboard",
+    page_icon="⚡",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+
+# ============================================================
+# CUSTOM CSS
+# ============================================================
+
+st.markdown(
+    """
+    <style>
+
+    .main-title {
+        font-size: 2.2rem;
+        font-weight: 800;
+        margin-bottom: 0px;
+    }
+
+    .sub-title {
+        font-size: 1.05rem;
+        margin-top: 0px;
+        margin-bottom: 15px;
+    }
+
+    .pipeline-card {
+        border-radius: 8px;
+        padding: 12px;
+        border-left: 4px solid;
+    }
+
+    .status-box {
+        border-radius: 8px;
+        padding: 15px;
+        margin-top: 10px;
+    }
+
+    .small-note {
+        font-size: 0.85rem;
+    }
+
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+
+# ============================================================
+# HEADER
+# ============================================================
+
+st.markdown(
+    '<div class="main-title">⚡ AERIS</div>',
+    unsafe_allow_html=True
+)
+
+st.markdown(
+    '<div class="sub-title">'
+    '<b>Adaptive Electricity Regime Intelligence System</b> '
+    '| DETECT → UNDERSTAND → ROUTE → QUANTIFY → ADAPT'
+    '</div>',
+    unsafe_allow_html=True
+)
+
+
+# ============================================================
+# SESSION STATE INITIALIZATION
+# ============================================================
+
+DEFAULT_STATE = {
+
+    # --------------------------------------------------------
+    # PS2 API SESSION
+    # --------------------------------------------------------
+
+    "api_session_id": None,
+    "api_stream": "sc1",
+    "api_team_name": "AERIS",
+    "api_total_rows": 0,
+    "api_step": 0,
+
+    "api_current_row": None,
+    "api_last_result": None,
+
+    "api_started": False,
+    "api_done": False,
+
+    # --------------------------------------------------------
+    # PS2 HISTORY
+    # --------------------------------------------------------
+
+    "api_rows": [],
+    "api_actual_history": [],
+    "api_prediction_history": [],
+    "api_error_history": [],
+    "api_abs_error_history": [],
+
+    "api_regime_history": [],
+    "api_adaptation_history": [],
+    "api_verification_history": [],
+
+    "api_change_probability_history": [],
+    "api_run_length_history": [],
+    "api_detector_status_history": [],
+
+    "api_interval_lower_history": [],
+    "api_interval_upper_history": [],
+
+    # --------------------------------------------------------
+    # PERSISTENT BOCPD STATE
+    # --------------------------------------------------------
+
+    "api_detector": None,
+    "api_classifier": None,
+
+    # --------------------------------------------------------
+    # CHANGE VERIFICATION STATE
+    # --------------------------------------------------------
+
+    "api_verification_state": "NORMAL",
+
+    "api_candidate_start": None,
+    "api_candidate_values": [],
+
+    "api_baseline_mean": None,
+    "api_baseline_std": None,
+
+    "api_persistent_change_active": False,
+
+    # --------------------------------------------------------
+    # FORECAST STRATEGY
+    # --------------------------------------------------------
+
+    "api_forecast_strategy": "BASELINE",
+
+    # --------------------------------------------------------
+    # COMPLETED STREAMS
+    # --------------------------------------------------------
+
+    "api_completed_streams": [],
+
+    # --------------------------------------------------------
+    # TRAINING ANALYSIS
+    # --------------------------------------------------------
+
+    "training_analysis": None
+
+}
+
+
+for key, value in DEFAULT_STATE.items():
+
+    if key not in st.session_state:
+
+        st.session_state[key] = value
+
+
+# ============================================================
+# SIDEBAR
+# ============================================================
+
+st.sidebar.header(
+    "Configuration Controls"
+)
+
+
+uploaded_file = st.sidebar.file_uploader(
+    "Upload Excel Dataset",
+    type=["xlsx", "xls", "csv"]
+)
+
+
+# ============================================================
+# EXISTING MODULE 1 CONTROLS
+# ============================================================
+
+st.sidebar.subheader(
+    "Module 1: BOCPD"
+)
+
+
+warmup = st.sidebar.slider(
+    "BOCPD Warmup Steps",
+    10,
+    50,
+    25,
+    step=5
+)
+
+
+p_thresh = st.sidebar.slider(
+    "P(Change) Threshold",
+    0.15,
+    0.70,
+    0.35,
+    step=0.05
+)
+
+
+min_confirm = st.sidebar.slider(
+    "Confirmation Persistence Steps",
+    1,
+    5,
+    3,
+    step=1
+)
+
+
+# ============================================================
+# EXISTING MODULE 3 & 4 CONTROLS
+# ============================================================
+
+st.sidebar.subheader(
+    "Module 3 & 4: Forecasting"
+)
+
+
+forecast_win = st.sidebar.slider(
+    "Validation Window (Days)",
+    7,
+    30,
+    14,
+    step=1
+)
+
+
+calib_win = st.sidebar.slider(
+    "Conformal Calibration Window",
+    10,
+    60,
+    30,
+    step=5
+)
+
+
+conformal_cov = st.sidebar.slider(
+    "Conformal Target Coverage",
+    0.75,
+    0.98,
+    0.90,
+    step=0.01
+)
+
+
+# ============================================================
+# NEW PS2 CONTROLS
+# ============================================================
+
+st.sidebar.subheader(
+    "PS2 Surprise 2: Verification"
+)
+
+
+ps2_watch_threshold = st.sidebar.slider(
+    "Verification Watch Threshold",
+    0.05,
+    0.50,
+    0.15,
+    step=0.05
+)
+
+
+ps2_persistence = st.sidebar.slider(
+    "Change Persistence Required",
+    1,
+    10,
+    3,
+    step=1
+)
+
+
+ps2_recent_window = st.sidebar.slider(
+    "Adaptive Recent Window",
+    7,
+    60,
+    14,
+    step=1
+)
+
+
+st.sidebar.markdown("---")
+
+
+# ============================================================
+# DATA LOADING
+# ============================================================
+
+@st.cache_data
+def load_data(f_upload):
+
+    if f_upload is not None:
+
+        filename = getattr(
+            f_upload,
+            "name",
+            ""
+        ).lower()
+
+        if filename.endswith(".csv"):
+
+            df = pd.read_csv(
+                f_upload
+            )
+
+        else:
+
+            df = pd.read_excel(
+                f_upload
+            )
+
+    else:
+
+        if os.path.exists(
+            DEFAULT_TRAINING_FILE
+        ):
+
+            df = pd.read_csv(
+                DEFAULT_TRAINING_FILE
+            )
+
+        elif os.path.exists(
+            FALLBACK_TRAINING_FILE
+        ):
+
+            df = pd.read_excel(
+                FALLBACK_TRAINING_FILE
+            )
+
+        else:
+
+            raise FileNotFoundError(
+                "Could not find training_set.csv or xo.xlsx."
+            )
+
+    # --------------------------------------------------------
+    # Normalize column names
+    # --------------------------------------------------------
+
+    df.columns = [
+        str(c).strip()
+        for c in df.columns
+    ]
+
+    # --------------------------------------------------------
+    # Timestamp conversion
+    # --------------------------------------------------------
+
+    if "timestamp" in df.columns:
+
+        df["timestamp"] = pd.to_datetime(
+            df["timestamp"],
+            errors="coerce"
+        )
+
+        df = (
+            df
+            .sort_values("timestamp")
+            .reset_index(drop=True)
+        )
+
+    # --------------------------------------------------------
+    # Target conversion
+    # --------------------------------------------------------
+
+    if "target" in df.columns:
+
+        df["target"] = pd.to_numeric(
+            df["target"],
+            errors="coerce"
+        )
+
+    # --------------------------------------------------------
+    # API feature conversion
+    # --------------------------------------------------------
+
+    for col in API_FEATURES:
+
+        if col in df.columns:
+
+            df[col] = pd.to_numeric(
+                df[col],
+                errors="coerce"
+            )
+
+    return df
+
+
+try:
+
+    raw_df = load_data(
+        uploaded_file
+    )
+
+except Exception as e:
+
+    st.error(
+        f"Error loading dataset: {e}"
+    )
+
+    st.stop()
+
+
+# ============================================================
+# DATA VALIDATION
+# ============================================================
+
+if "target" not in raw_df.columns:
+
+    st.error(
+        "Dataset must contain a 'target' column."
+    )
+
+    st.stop()
+
+
+if len(raw_df) < 50:
+
+    st.warning(
+        "Dataset contains fewer than 50 rows. "
+        "Forecasting results may be unstable."
+    )
+
+
+# ============================================================
+# EXISTING AERIS PIPELINE
+# ============================================================
+
+@st.cache_resource(
+    show_spinner=
+    "Running AERIS End-to-End Intelligence Loop..."
+)
+def run_aeris_pipeline(
+    df_in,
+    w_up,
+    p_th,
+    m_conf,
+    f_win,
+    c_win,
+    c_cov
+):
+
+    b_cfg = BOCPDConfig(
+        warmup_steps=w_up,
+        p_change_threshold=p_th,
+        min_confirmation_steps=m_conf
+    )
+
+    r_cfg = RegimeConfig()
+
+    pipe = AERISPipeline(
+        bocpd_config=b_cfg,
+        regime_config=r_cfg,
+        forecasting_window=f_win,
+        calibration_window=c_win,
+        conformal_coverage=c_cov
+    )
+
+    return pipe.run_full(
+        df_in,
+        target_col="target"
+    )
+
+
+try:
+
+    results = run_aeris_pipeline(
+        raw_df,
+        warmup,
+        p_thresh,
+        min_confirm,
+        forecast_win,
+        calib_win,
+        conformal_cov
+    )
+
+except Exception as e:
+
+    st.error(
+        f"AERIS pipeline error: {e}"
+    )
+
+    st.exception(e)
+
+    st.stop()
+
+
+if not results:
+
+    st.error(
+        "No pipeline results generated."
+    )
+
+    st.stop()
+
+
+latest = results[-1]
+
+
+# ============================================================
+# EXISTING SYSTEM OVERVIEW
+# ============================================================
+
+st.markdown(
+    "### SYSTEM OVERVIEW"
+)
+
+
+k1, k2, k3, k4 = st.columns(4)
+
+
+k1.metric(
+    "Current Demand",
+    f"{latest.actual_demand:.2f}"
+)
+
+
+k2.metric(
+    "Forecast",
+    f"{latest.forecast.point_forecast:.2f}"
+)
+
+
+k3.metric(
+    "Current Regime",
+    latest.regime.regime.name.replace(
+        "_",
+        " "
+    )
+)
+
+
+k4.metric(
+    "P(Change)",
+    f"{latest.detection.change_probability * 100:.1f}%"
+)
+
+
+k5, k6, k7 = st.columns(3)
+
+
+k5.metric(
+    "Selected Model",
+    latest.forecast.selected_model
+)
+
+
+k6.metric(
+    "Prediction Interval",
+    (
+        f"[{latest.conformal.lower_bound:.1f}, "
+        f"{latest.conformal.upper_bound:.1f}]"
+    )
+)
+
+
+k7.metric(
+    "System Status",
+    latest.detection.detector_status.name
+)
+
+
+# ============================================================
+# NEW PS2 STATUS SUMMARY
+# ============================================================
+
+if st.session_state.api_started:
+
+    st.markdown(
+        "### PS2 SURPRISE 2 STATUS"
+    )
+
+    s1, s2, s3, s4 = st.columns(4)
+
+    s1.metric(
+        "Stream",
+        st.session_state.api_stream.upper()
+    )
+
+    s2.metric(
+        "Verification",
+        st.session_state.api_verification_state
+    )
+
+    s3.metric(
+        "Forecast Strategy",
+        st.session_state.api_forecast_strategy
+    )
+
+    s4.metric(
+        "Adaptations",
+        sum(
+            st.session_state.api_adaptation_history
+        )
+    )
+
+
+# ============================================================
+# EXISTING END-TO-END PIPELINE
+# ============================================================
+
+st.markdown(
+    "### END-TO-END PIPELINE"
+)
+
+
+p1, p2, p3, p4, p5 = st.columns(5)
+
+
+with p1:
+
+    st.info(
+        f"""
+        **1. DATA**
+
+        Demand: `{latest.actual_demand:.2f}`
+
+        Step: `T={latest.step}`
+        """
+    )
+
+
+with p2:
+
+    st.warning(
+        f"""
+        **2. DETECT**
+
+        BOCPD P(Change):
+        `{latest.detection.change_probability:.2f}`
+
+        Status:
+        `{latest.detection.detector_status.name}`
+        """
+    )
+
+
+with p3:
+
+    st.info(
+        f"""
+        **3. UNDERSTAND**
+
+        Regime:
+        `{latest.regime.regime.name}`
+
+        Confidence:
+        `{latest.regime.confidence * 100:.0f}%`
+        """
+    )
+
+
+with p4:
+
+    st.success(
+        f"""
+        **4. ROUTE**
+
+        Model:
+        `{latest.forecast.selected_model}`
+
+        Validation:
+        Recent MAE
+        """
+    )
+
+
+with p5:
+
+    st.info(
+        f"""
+        **5. QUANTIFY**
+
+        Interval:
+        `[{latest.conformal.lower_bound:.1f},
+        {latest.conformal.upper_bound:.1f}]`
+
+        Width:
+        `{latest.conformal.interval_width:.1f}`
+        """
+    )
+
+
+st.markdown("---")
+
+
+# ============================================================
+# HELPER FUNCTIONS FOR EXISTING PIPELINE
+# ============================================================
+
+def safe_status_name(detection):
+
+    status = getattr(
+        detection,
+        "detector_status",
+        None
+    )
+
+    if status is None:
+
+        status = getattr(
+            detection,
+            "status",
+            "UNKNOWN"
+        )
+
+    if hasattr(
+        status,
+        "name"
+    ):
+
+        return status.name
+
+    return str(status).split(".")[-1]
+
+
+def safe_regime_name(regime_result):
+
+    regime = getattr(
+        regime_result,
+        "regime",
+        "UNKNOWN"
+    )
+
+    if hasattr(
+        regime,
+        "name"
+    ):
+
+        return regime.name
+
+    return str(regime).split(".")[-1]
+
+
+def safe_regime_reason(regime_result):
+
+    return getattr(
+        regime_result,
+        "classification_reason",
+        getattr(
+            regime_result,
+            "reason",
+            "No classification reason available."
+        )
+    )
+
+
+# ============================================================
+# ============================================================
+# PS2 FUNCTIONS
+# ============================================================
+# ============================================================
+
+
+# ============================================================
+# MODEL FACTORY
+# ============================================================
+
+def create_models():
+
+    return {
+
+        "Linear Regression":
+            LinearRegression(),
+
+        "Ridge Regression":
+            Ridge(
+                alpha=10.0
+            ),
+
+        "Gradient Boosting":
+            GradientBoostingRegressor(
+                n_estimators=80,
+                max_depth=3,
+                learning_rate=0.05,
+                random_state=42
+            ),
+
+        "Random Forest":
+            RandomForestRegressor(
+                n_estimators=80,
+                max_depth=5,
+                random_state=42
+            )
+    }
+
+
+# ============================================================
+# FEATURE ENGINEERING
+# ============================================================
+
+def build_features(df):
+
+    data = df.copy()
+
+    # --------------------------------------------------------
+    # Timestamp features
+    # --------------------------------------------------------
+
+    if "timestamp" in data.columns:
+
+        ts = pd.to_datetime(
+            data["timestamp"],
+            errors="coerce"
+        )
+
+        data["hour"] = ts.dt.hour
+
+        data["day_of_week"] = ts.dt.dayofweek
+
+        data["day"] = ts.dt.day
+
+        data["day_of_month"] = ts.dt.day
+
+        data["month"] = ts.dt.month
+
+        data["day_of_year"] = ts.dt.dayofyear
+
+        data["is_weekend"] = (
+            ts.dt.dayofweek >= 5
+        ).astype(float)
+
+    # --------------------------------------------------------
+    # Lag features
+    # --------------------------------------------------------
+
+    if "target" in data.columns:
+
+        for lag in [
+            1,
+            2,
+            3,
+            7,
+            14,
+            30
+        ]:
+
+            data[
+                f"lag_{lag}"
+            ] = (
+                data["target"]
+                .shift(lag)
+            )
+
+        # ----------------------------------------------------
+        # IMPORTANT:
+        # shift BEFORE rolling.
+        #
+        # This prevents current target leakage.
+        # ----------------------------------------------------
+
+        shifted_target = (
+            data["target"]
+            .shift(1)
+        )
+
+        for window in [
+            7,
+            14,
+            30
+        ]:
+
+            data[
+                f"rolling_mean_{window}"
+            ] = (
+                shifted_target
+                .rolling(
+                    window=window,
+                    min_periods=max(
+                        3,
+                        window // 2
+                    )
+                )
+                .mean()
+            )
+
+            data[
+                f"rolling_std_{window}"
+            ] = (
+                shifted_target
+                .rolling(
+                    window=window,
+                    min_periods=max(
+                        3,
+                        window // 2
+                    )
+                )
+                .std()
+            )
+
+    return data
+
+
+# ============================================================
+# TRAIN BEST MODEL
+# ============================================================
+
+def train_best_model(
+    history_df,
+    validation_days=14
+):
+
+    if history_df is None:
+
+        return (
+            None,
+            None,
+            [],
+            None
+        )
+
+    if len(history_df) < 20:
+
+        return (
+            None,
+            None,
+            [],
+            None
+        )
+
+    feature_df = build_features(
+        history_df
+    )
+
+    # --------------------------------------------------------
+    # Numeric feature discovery
+    # --------------------------------------------------------
+
+    feature_columns = []
+
+    for col in feature_df.columns:
+
+        if col in [
+            "timestamp",
+            "target"
+        ]:
+
+            continue
+
+        if pd.api.types.is_numeric_dtype(
+            feature_df[col]
+        ):
+
+            feature_columns.append(
+                col
+            )
+
+    if not feature_columns:
+
+        return (
+            None,
+            None,
+            [],
+            None
+        )
+
+    clean = feature_df[
+        feature_columns + ["target"]
+    ].replace(
+        [np.inf, -np.inf],
+        np.nan
+    ).dropna()
+
+    if len(clean) < 20:
+
+        return (
+            None,
+            None,
+            [],
+            None
+        )
+
+    # --------------------------------------------------------
+    # Time-based validation
+    # --------------------------------------------------------
+
+    val_size = min(
+        validation_days,
+        max(
+            5,
+            len(clean) // 4
+        )
+    )
+
+    if len(clean) <= val_size:
+
+        return (
+            None,
+            None,
+            [],
+            None
+        )
+
+    train_part = clean.iloc[
+        :-val_size
+    ]
+
+    val_part = clean.iloc[
+        -val_size:
+    ]
+
+    X_train = train_part[
+        feature_columns
+    ]
+
+    y_train = train_part[
+        "target"
+    ]
+
+    X_val = val_part[
+        feature_columns
+    ]
+
+    y_val = val_part[
+        "target"
+    ]
+
+    candidate_evals = []
+
+    best_name = None
+    best_mae = np.inf
+
+    # --------------------------------------------------------
+    # Benchmark every model
+    # --------------------------------------------------------
+
+    for model_name, model in create_models().items():
+
+        try:
+
+            model.fit(
+                X_train,
+                y_train
+            )
+
+            predictions = model.predict(
+                X_val
+            )
+
+            mae = mean_absolute_error(
+                y_val,
+                predictions
+            )
+
+            rmse = np.sqrt(
+                mean_squared_error(
+                    y_val,
+                    predictions
+                )
+            )
+
+            selected = (
+                mae < best_mae
+            )
+
+            if selected:
+
+                best_mae = mae
+                best_name = model_name
+
+            candidate_evals.append(
+                {
+                    "model_name":
+                        model_name,
+
+                    "mae":
+                        float(mae),
+
+                    "rmse":
+                        float(rmse),
+
+                    "selected":
+                        selected
+                }
+            )
+
+        except Exception as e:
+
+            candidate_evals.append(
+                {
+                    "model_name":
+                        model_name,
+
+                    "mae":
+                        np.nan,
+
+                    "rmse":
+                        np.nan,
+
+                    "selected":
+                        False,
+
+                    "error":
+                        str(e)
+                }
+            )
+
+    if best_name is None:
+
+        return (
+            None,
+            None,
+            candidate_evals,
+            None
+        )
+
+    # --------------------------------------------------------
+    # Refit selected model on all available clean history
+    # --------------------------------------------------------
+
+    final_model = create_models()[
+        best_name
+    ]
+
+    final_model.fit(
+        clean[feature_columns],
+        clean["target"]
+    )
+
+    # --------------------------------------------------------
+    # Validation predictions
+    # --------------------------------------------------------
+
+    selected_validation_model = create_models()[
+        best_name
+    ]
+
+    selected_validation_model.fit(
+        X_train,
+        y_train
+    )
+
+    validation_predictions = (
+        selected_validation_model.predict(
+            X_val
+        )
+    )
+
+    validation_frame = pd.DataFrame(
+        {
+            "actual":
+                y_val.to_numpy(),
+
+            "prediction":
+                validation_predictions
+        },
+        index=val_part.index
+    )
+
+    return (
+        final_model,
+        best_name,
+        candidate_evals,
+        (
+            feature_columns,
+            validation_frame
+        )
+    )
+
+
+# ============================================================
+# ADAPTIVE MODEL TRAINING
+# ============================================================
+
+def train_adaptive_model(
+    history_df,
+    validation_days=14,
+    recent_window=14
+):
+
+    if history_df is None:
+
+        return (
+            None,
+            None,
+            [],
+            None
+        )
+
+    if len(history_df) < 20:
+
+        return (
+            None,
+            None,
+            [],
+            None
+        )
+
+    # --------------------------------------------------------
+    # Recent-regime window
+    #
+    # We don't throw away the whole history.
+    # We deliberately train on a recent section after
+    # persistent change confirmation.
+    # --------------------------------------------------------
+
+    minimum_window = max(
+        40,
+        validation_days * 4
+    )
+
+    requested_window = max(
+        minimum_window,
+        recent_window * 4
+    )
+
+    requested_window = min(
+        requested_window,
+        len(history_df)
+    )
+
+    adaptive_history = (
+        history_df
+        .tail(requested_window)
+        .copy()
+    )
+
+    return train_best_model(
+        adaptive_history,
+        validation_days=min(
+            validation_days,
+            max(
+                5,
+                len(adaptive_history) // 4
+            )
+        )
+    )
+
+
+# ============================================================
+# PREDICT API ROW
+# ============================================================
+
+def predict_api_row(
+    history_df,
+    api_row,
+    validation_days,
+    strategy="BASELINE",
+    recent_window=14
+):
+
+    if history_df is None:
+
+        return (
+            None,
+            None,
+            [],
+            None
+        )
+
+    # --------------------------------------------------------
+    # Build history for feature generation
+    #
+    # The current API target is hidden.
+    # --------------------------------------------------------
+
+    current_row = pd.DataFrame(
+        [api_row]
+    )
+
+    current_row["target"] = np.nan
+
+    working_history = pd.concat(
+        [
+            history_df.copy(),
+            current_row
+        ],
+        ignore_index=True
+    )
+
+    # --------------------------------------------------------
+    # Select forecasting strategy
+    # --------------------------------------------------------
+
+    if strategy == "ADAPTIVE":
+
+        (
+            model,
+            model_name,
+            candidate_evals,
+            model_meta
+        ) = train_adaptive_model(
+            history_df,
+            validation_days,
+            recent_window
+        )
+
+    else:
+
+        (
+            model,
+            model_name,
+            candidate_evals,
+            model_meta
+        ) = train_best_model(
+            history_df,
+            validation_days
+        )
+
+    if model is None:
+
+        return (
+            None,
+            None,
+            candidate_evals,
+            model_meta
+        )
+
+    feature_df = build_features(
+        working_history
+    )
+
+    feature_columns = model_meta[0]
+
+    latest_features = (
+        feature_df
+        .iloc[-1]
+        .copy()
+    )
+
+    X_latest = pd.DataFrame(
+        [
+            latest_features
+        ]
+    )
+
+    # --------------------------------------------------------
+    # Missing feature handling
+    # --------------------------------------------------------
+
+    for col in feature_columns:
+
+        if col not in X_latest.columns:
+
+            X_latest[col] = 0.0
+
+    X_latest = X_latest[
+        feature_columns
+    ]
+
+    # Fill using historical feature medians
+    historical_features = (
+        feature_df[
+            feature_columns
+        ]
+        .replace(
+            [np.inf, -np.inf],
+            np.nan
+        )
+    )
+
+    for col in feature_columns:
+
+        if pd.isna(
+            X_latest.iloc[0][col]
+        ):
+
+            median_value = (
+                historical_features[col]
+                .median()
+            )
+
+            if pd.isna(
+                median_value
+            ):
+
+                median_value = 0.0
+
+            X_latest.loc[
+                X_latest.index[0],
+                col
+            ] = median_value
+
+    prediction = float(
+        model.predict(
+            X_latest
+        )[0]
+    )
+
+    return (
+        prediction,
+        model_name,
+        candidate_evals,
+        model_meta
+    )
+
+
+# ============================================================
+# CREATE BOCPD DETECTOR
+# ============================================================
+
+def create_ps2_detector():
+
+    config = BOCPDConfig(
+        warmup_steps=warmup,
+        p_change_threshold=p_thresh,
+        min_confirmation_steps=min_confirm
+    )
+
+    try:
+
+        detector = BOCPDDetector(
+            config
+        )
+
+    except TypeError:
+
+        detector = BOCPDDetector(
+            config=config
+        )
+
+    return detector
+
+
+# ============================================================
+# CREATE REGIME CLASSIFIER
+# ============================================================
+
+def create_ps2_classifier():
+
+    try:
+
+        config = RegimeConfig(
+            persistent_steps_threshold=
+            ps2_persistence
+        )
+
+    except TypeError:
+
+        config = RegimeConfig()
+
+    try:
+
+        classifier = RuleBasedRegimeClassifier(
+            config
+        )
+
+    except TypeError:
+
+        classifier = RuleBasedRegimeClassifier(
+            config=config
+        )
+
+    return classifier
+
+
+# ============================================================
+# SAFE DETECTION VALUE HELPERS
+# ============================================================
+
+def get_change_probability(
+    detection
+):
+
+    return float(
+        getattr(
+            detection,
+            "change_probability",
+            0.0
+        )
+    )
+
+
+def get_map_run_length(
+    detection
+):
+
+    return int(
+        getattr(
+            detection,
+            "map_run_length",
+            0
+        )
+    )
+
+
+def get_consecutive_warnings(
+    detection
+):
+
+    return int(
+        getattr(
+            detection,
+            "consecutive_warnings",
+            0
+        )
+    )
+
+
+def get_detector_status(
+    detection
+):
+
+    return safe_status_name(
+        detection
+    )
+
+
+# ============================================================
+# VERIFY CHANGE
+#
+# THIS IS THE NEW SURPRISE 2 CORE.
+# ============================================================
+
+def verify_change(
+    historical_values,
+    current_value,
+    change_probability,
+    candidate_start,
+    candidate_values,
+    baseline_mean,
+    baseline_std
+):
+
+    values = [
+        float(v)
+        for v in historical_values
+        if pd.notna(v)
+    ]
+
+    current_value = float(
+        current_value
+    )
+
+    # --------------------------------------------------------
+    # Need a baseline
+    # --------------------------------------------------------
+
+    if len(values) < 10:
+
+        return {
+            "state": "NORMAL",
+            "candidate_start": candidate_start,
+            "candidate_values": candidate_values,
+            "baseline_mean": baseline_mean,
+            "baseline_std": baseline_std,
+            "reason":
+                "Insufficient history for change verification.",
+            "persistence_count": 0,
+            "outside_baseline": False,
+            "bocpd_support": False
+        }
+
+    # --------------------------------------------------------
+    # Create baseline ONLY when a candidate does not exist.
+    #
+    # Once candidate starts, baseline remains frozen.
+    # --------------------------------------------------------
+
+    if (
+        candidate_start is None
+        and baseline_mean is None
+    ):
+
+        baseline_values = values[-20:]
+
+        baseline_mean = float(
+            np.mean(
+                baseline_values
+            )
+        )
+
+        baseline_std = float(
+            np.std(
+                baseline_values
+            )
+        )
+
+        baseline_std = max(
+            baseline_std,
+            0.5
+        )
+
+    # --------------------------------------------------------
+    # Frozen baseline
+    # --------------------------------------------------------
+
+    lower_bound = (
+        baseline_mean
+        - 2.0 * baseline_std
+    )
+
+    upper_bound = (
+        baseline_mean
+        + 2.0 * baseline_std
+    )
+
+    outside_baseline = (
+        current_value < lower_bound
+        or
+        current_value > upper_bound
+    )
+
+    bocpd_support = (
+        change_probability
+        >= p_thresh
+    )
+
+    # --------------------------------------------------------
+    # No candidate currently active
+    # --------------------------------------------------------
+
+    if candidate_start is None:
+
+        if (
+            outside_baseline
+            or
+            bocpd_support
+        ):
+
+            candidate_values = [
+                current_value
+            ]
+
+            candidate_start = len(
+                values
+            )
+
+            reason_parts = []
+
+            if outside_baseline:
+
+                reason_parts.append(
+                    "observation is outside "
+                    "the frozen baseline range"
+                )
+
+            if bocpd_support:
+
+                reason_parts.append(
+                    "BOCPD P(Change) crossed "
+                    "the detection threshold"
+                )
+
+            return {
+                "state": "CANDIDATE",
+                "candidate_start": candidate_start,
+                "candidate_values": candidate_values,
+                "baseline_mean": baseline_mean,
+                "baseline_std": baseline_std,
+                "reason":
+                    "Change candidate detected because "
+                    + " and ".join(reason_parts)
+                    + ". Persistence is being checked.",
+                "persistence_count": 1,
+                "outside_baseline":
+                    outside_baseline,
+                "bocpd_support":
+                    bocpd_support
+            }
+
+        return {
+            "state": "NORMAL",
+            "candidate_start": None,
+            "candidate_values": [],
+            "baseline_mean": None,
+            "baseline_std": None,
+            "reason":
+                "Observation remains within the normal "
+                "baseline and BOCPD has not confirmed a change.",
+            "persistence_count": 0,
+            "outside_baseline":
+                False,
+            "bocpd_support":
+                False
+        }
+
+    # --------------------------------------------------------
+    # Candidate already exists
+    # --------------------------------------------------------
+
+    candidate_values = list(
+        candidate_values
+    )
+
+    candidate_values.append(
+        current_value
+    )
+
+    persistence_count = len(
+        candidate_values
+    )
+
+    # --------------------------------------------------------
+    # Still abnormal
+    # --------------------------------------------------------
+
+    if outside_baseline:
+
+        if (
+            persistence_count
+            >= ps2_persistence
+        ):
+
+            return {
+                "state": "PERSISTENT",
+                "candidate_start": candidate_start,
+                "candidate_values":
+                    candidate_values,
+                "baseline_mean":
+                    baseline_mean,
+                "baseline_std":
+                    baseline_std,
+                "reason":
+                    (
+                        f"Deviation remained outside "
+                        f"the frozen baseline for "
+                        f"{persistence_count} consecutive "
+                        f"observations. Persistent change confirmed."
+                    ),
+                "persistence_count":
+                    persistence_count,
+                "outside_baseline":
+                    True,
+                "bocpd_support":
+                    bocpd_support
+            }
+
+        return {
+            "state": "VERIFYING",
+            "candidate_start": candidate_start,
+            "candidate_values":
+                candidate_values,
+            "baseline_mean":
+                baseline_mean,
+            "baseline_std":
+                baseline_std,
+            "reason":
+                (
+                    f"Deviation is still abnormal, but only "
+                    f"{persistence_count}/{ps2_persistence} "
+                    f"required observations have been confirmed."
+                ),
+            "persistence_count":
+                persistence_count,
+            "outside_baseline":
+                True,
+            "bocpd_support":
+                bocpd_support
+        }
+
+    # --------------------------------------------------------
+    # It returned to normal BEFORE persistence.
+    # --------------------------------------------------------
+
+    return {
+        "state": "TEMPORARY DISTURBANCE",
+        "candidate_start": None,
+        "candidate_values": [],
+        "baseline_mean": None,
+        "baseline_std": None,
+        "reason":
+            (
+                "The unusual observation returned to the "
+                "previous baseline before persistence was "
+                "confirmed. Existing forecasting strategy "
+                "is retained."
+            ),
+        "persistence_count":
+            persistence_count,
+        "outside_baseline":
+            False,
+        "bocpd_support":
+            bocpd_support
+    }
+
+
+# ============================================================
+# ADAPTATION DECISION
+# ============================================================
+
+def decide_adaptation(
+    verification_state
+):
+
+    if verification_state == "PERSISTENT":
+
+        return (
+            True,
+            "Persistent change confirmed. "
+            "Adaptive forecasting is activated "
+            "for subsequent predictions."
+        )
+
+    if verification_state == "TEMPORARY DISTURBANCE":
+
+        return (
+            False,
+            "Temporary disturbance detected. "
+            "The forecasting strategy is held steady "
+            "to avoid overreacting to a short-lived event."
+        )
+
+    if verification_state in [
+        "CANDIDATE",
+        "VERIFYING"
+    ]:
+
+        return (
+            False,
+            "Change is still being verified. "
+            "No forecasting strategy change is made yet."
+        )
+
+    return (
+        False,
+        "No confirmed persistent change. "
+        "Existing forecasting strategy is retained."
+    )
+
+
+# ============================================================
+# API START SESSION
+# ============================================================
+
+def api_start_session(
+    team_name,
+    stream_name
+):
+
+    url = (
+        f"{API_BASE}/session/start"
+    )
+
+    payload = {
+        "team_name": team_name,
+        "stream": stream_name
+    }
+
+    response = requests.post(
+        url,
+        json=payload,
+        timeout=30
+    )
+
+    if response.status_code != 200:
+
+        raise RuntimeError(
+            f"API session start failed "
+            f"({response.status_code}): "
+            f"{response.text}"
+        )
+
+    data = response.json()
+
+    return data
+
+    if response.status_code != 200:
+
+        raise RuntimeError(
+            f"API session start failed "
+            f"({response.status_code}): "
+            f"{response.text}"
+        )
+
+    data = response.json()
+
+    return data
+
+
+# ============================================================
+# API GET NEXT
+# ============================================================
+
+def api_get_next(
+    session_id
+):
+
+    url = (
+        f"{API_BASE}/session/"
+        f"{session_id}/next"
+    )
+
+    response = requests.get(
+        url,
+        timeout=30
+    )
+
+    if response.status_code != 200:
+
+        raise RuntimeError(
+            f"GET /next failed "
+            f"({response.status_code}): "
+            f"{response.text}"
+        )
+
+    return response.json()
+
+
+# ============================================================
+# API SUBMIT PREDICTION
+# ============================================================
+
+def api_submit_prediction(
+    session_id,
+    prediction
+):
+
+    url = (
+        f"{API_BASE}/session/"
+        f"{session_id}/predict"
+    )
+
+    payload = {
+        "predicted_target":
+            float(prediction)
+    }
+
+    response = requests.post(
+        url,
+        json=payload,
+        timeout=30
+    )
+
+    if response.status_code != 200:
+
+        raise RuntimeError(
+            f"Prediction submission failed "
+            f"({response.status_code}): "
+            f"{response.text}"
+        )
+
+    return response.json()
+
+
+# ============================================================
+# RESET LOCAL PS2 STATE
+# ============================================================
+
+def reset_ps2_state():
+
+    for key, value in DEFAULT_STATE.items():
+
+        if key in [
+            "api_completed_streams"
+        ]:
+
+            continue
+
+        st.session_state[key] = value
+
+
+# ============================================================
+# INITIALIZE PS2 DETECTOR
+#
+# IMPORTANT:
+# Training data is fed ONCE.
+# We never recreate the detector for every prediction.
+# ============================================================
+
+def initialize_ps2_monitoring(
+    training_df
+):
+
+    detector = create_ps2_detector()
+
+    classifier = create_ps2_classifier()
+
+    training_values = (
+        training_df["target"]
+        .dropna()
+        .astype(float)
+        .tolist()
+    )
+
+    last_detection = None
+
+    for value in training_values:
+
+        try:
+
+            detection = detector.update(
+                value
+            )
+
+            last_detection = detection
+
+            try:
+
+                classifier.classify(
+                    detection
+                )
+
+            except Exception:
+
+                pass
+
+        except Exception:
+
+            pass
+
+    st.session_state.api_detector = (
+        detector
+    )
+
+    st.session_state.api_classifier = (
+        classifier
+    )
+
+    st.session_state.api_verification_state = (
+        "NORMAL"
+    )
+
+    st.session_state.api_candidate_start = (
+        None
+    )
+
+    st.session_state.api_candidate_values = (
+        []
+    )
+
+    st.session_state.api_baseline_mean = (
+        None
+    )
+
+    st.session_state.api_baseline_std = (
+        None
+    )
+
+    st.session_state.api_persistent_change_active = (
+        False
+    )
+
+    st.session_state.api_forecast_strategy = (
+        "BASELINE"
+    )
+
+    return last_detection
+
+
+# ============================================================
+# CONFORMAL CALIBRATION
+# ============================================================
+
+def calculate_conformal_radius(
+    history_df,
+    validation_days,
+    calibration_window,
+    coverage,
+    previous_api_errors=None
+):
+
+    residuals = []
+
+    # --------------------------------------------------------
+    # First use already revealed PS2 errors.
+    #
+    # Current actual is NOT included.
+    # --------------------------------------------------------
+
+    if previous_api_errors:
+
+        residuals.extend(
+            [
+                abs(float(e))
+                for e in previous_api_errors
+                if pd.notna(e)
+            ]
+        )
+
+    # --------------------------------------------------------
+    # Training residuals
+    # --------------------------------------------------------
+
+    if len(residuals) < 5:
+
+        (
+            model,
+            model_name,
+            candidate_evals,
+            model_meta
+        ) = train_best_model(
+            history_df,
+            validation_days
+        )
+
+        if (
+            model is not None
+            and model_meta is not None
+        ):
+
+            feature_columns, validation_frame = (
+                model_meta
+            )
+
+            training_residuals = (
+                np.abs(
+                    validation_frame["actual"]
+                    -
+                    validation_frame["prediction"]
+                )
+                .tolist()
+            )
+
+            residuals.extend(
+                training_residuals
+            )
+
+    if not residuals:
+
+        target_values = (
+            history_df["target"]
+            .dropna()
+            .astype(float)
+        )
+
+        if len(target_values) > 1:
+
+            fallback = float(
+                target_values.std()
+            )
+
+            if not np.isfinite(
+                fallback
+            ):
+
+                fallback = 5.0
+
+            return max(
+                fallback,
+                0.5
+            )
+
+        return 5.0
+
+    residuals = np.asarray(
+        residuals,
+        dtype=float
+    )
+
+    residuals = residuals[
+        np.isfinite(residuals)
+    ]
+
+    if len(residuals) == 0:
+
+        return 5.0
+
+    residuals = residuals[
+        -calibration_window:
+    ]
+
+    n = len(
+        residuals
+    )
+
+    # --------------------------------------------------------
+    # Finite sample conformal quantile
+    # --------------------------------------------------------
+
+    quantile_level = min(
+        1.0,
+        coverage * (
+            1.0 + 1.0 / n
+        )
+    )
+
+    radius = float(
+        np.quantile(
+            residuals,
+            quantile_level
+        )
+    )
+
+    return max(
+        radius,
+        0.5
+    )
+
+
+# ============================================================
+# MAKE NEXT ROW FOR OFFLINE FORECAST
+# ============================================================
+
+def make_offline_next_row(
+    training_df
+):
+
+    row = {}
+
+    # --------------------------------------------------------
+    # Timestamp
+    # --------------------------------------------------------
+
+    if "timestamp" in training_df.columns:
+
+        timestamps = (
+            pd.to_datetime(
+                training_df["timestamp"],
+                errors="coerce"
+            )
+            .dropna()
+            .sort_values()
+        )
+
+        if len(timestamps) >= 2:
+
+            delta = (
+                timestamps
+                .diff()
+                .dropna()
+                .median()
+            )
+
+            if pd.isna(
+                delta
+            ):
+
+                delta = pd.Timedelta(
+                    days=1
+                )
+
+            row["timestamp"] = (
+                timestamps.iloc[-1]
+                + delta
+            )
+
+        elif len(timestamps) == 1:
+
+            row["timestamp"] = (
+                timestamps.iloc[-1]
+                + pd.Timedelta(
+                    days=1
+                )
+            )
+
+    # --------------------------------------------------------
+    # Forward-fill other available variables.
+    # --------------------------------------------------------
+
+    for col in training_df.columns:
+
+        if col in [
+            "target",
+            "timestamp"
+        ]:
+
+            continue
+
+        row[col] = (
+            training_df[col]
+            .iloc[-1]
+        )
+
+    row["target"] = np.nan
+
+    return row
+
+
+# ============================================================
+# TABS
+# ============================================================
+
+(
+    t_demand,
+    t_detect,
+    t_regime,
+    t_forecast,
+    t_quant,
+    t_adapt,
+    t_ps2,
+    t_data
+) = st.tabs(
+    [
+        "Demand Monitoring",
+        "Module 1: Detect",
+        "Module 2: Understand",
+        "Module 3: Route & Forecast",
+        "Module 4: Quantify",
+        "Adaptation Status",
+        "PS2 Evaluation",
+        "Dataset Info"
+    ]
+)
+
+
+# ============================================================
+# COMMON EXISTING DATA
+# ============================================================
+
+dates = [
+    r.timestamp
+    for r in results
+]
+
+actuals = [
+    r.actual_demand
+    for r in results
+]
+
+preds = [
+    r.forecast.point_forecast
+    for r in results
+]
+
+lowers = [
+    r.conformal.lower_bound
+    for r in results
+]
+
+uppers = [
+    r.conformal.upper_bound
+    for r in results
+]
+
+p_changes = [
+    r.detection.change_probability
+    for r in results
+]
+
+map_rls = [
+    r.detection.map_run_length
+    for r in results
+]
+
+changes_idx = [
+    r.step
+    for r in results
+    if r.detection.is_change_detected
+]
+
+
+# ============================================================
+# EXISTING DEMAND MONITORING
+# ============================================================
+
+with t_demand:
+
+    st.markdown(
+        "#### Historical & Recent Electricity Demand"
+    )
+
+    fig_d = go.Figure()
+
+    fig_d.add_trace(
+        go.Scatter(
+            x=dates,
+            y=actuals,
+            mode="lines",
+            name="Observed Demand"
+        )
+    )
+
+    fig_d.add_trace(
+        go.Scatter(
+            x=dates,
+            y=pd.Series(
+                actuals
+            ).rolling(
+                7
+            ).mean(),
+            mode="lines",
+            name="7-Day Rolling Mean"
+        )
+    )
+
+    fig_d.update_layout(
+        height=420,
+        margin=dict(
+            l=10,
+            r=10,
+            t=30,
+            b=10
+        ),
+        hovermode="x unified"
+    )
+
+    st.plotly_chart(
+        fig_d,
+        use_container_width=True
+    )
+
+
+# ============================================================
+# EXISTING MODULE 1
+# ============================================================
+
+with t_detect:
+
+    st.markdown(
+        "#### Bayesian Online Change-Point Detection"
+    )
+
+    c1, c2, c3, c4 = st.columns(4)
+
+    c1.metric(
+        "Latest P(Change)",
+        f"{latest.detection.change_probability:.3f}"
+    )
+
+    c2.metric(
+        "MAP Run Length",
+        f"{latest.detection.map_run_length}"
+    )
+
+    c3.metric(
+        "Detector Status",
+        latest.detection.detector_status.name
+    )
+
+    c4.metric(
+        "Confirmed Changes",
+        len(changes_idx)
+    )
+
+    fig_det = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        subplot_titles=(
+            "Demand with Confirmed Change Points",
+            "Bayesian Change Probability"
+        )
+    )
+
+    fig_det.add_trace(
+        go.Scatter(
+            x=dates,
+            y=actuals,
+            name="Demand"
+        ),
+        row=1,
+        col=1
+    )
+
+    for c_i in changes_idx:
+
+        if 1 <= c_i <= len(dates):
+
+            fig_det.add_vline(
+                x=dates[c_i - 1],
+                line_width=1.5,
+                line_dash="dash",
+                row=1,
+                col=1
+            )
+
+    fig_det.add_trace(
+        go.Scatter(
+            x=dates,
+            y=p_changes,
+            name="P(Change)"
+        ),
+        row=2,
+        col=1
+    )
+
+    fig_det.add_hline(
+        y=p_thresh,
+        line_dash="dot",
+        annotation_text="Threshold",
+        row=2,
+        col=1
+    )
+
+    fig_det.add_hline(
+        y=ps2_watch_threshold,
+        line_dash="dash",
+        annotation_text="Watch",
+        row=2,
+        col=1
+    )
+
+    fig_det.update_layout(
+        height=500,
+        margin=dict(
+            l=10,
+            r=10,
+            t=40,
+            b=10
+        ),
+        hovermode="x unified"
+    )
+
+    st.plotly_chart(
+        fig_det,
+        use_container_width=True
+    )
+
+    st.write(
+        "Change evidence accumulation:",
+        latest.detection.consecutive_warnings
+    )
+
+
+# ============================================================
+# EXISTING MODULE 2
+# ============================================================
+
+with t_regime:
+
+    st.markdown(
+        "#### Demand Regime Understanding"
+    )
+
+    r1, r2 = st.columns(2)
+
+    with r1:
+
+        st.info(
+            f"""
+            **Current Regime**
+
+            `{latest.regime.regime.name}`
+
+            **Confidence**
+
+            `{latest.regime.confidence * 100:.1f}%`
+            """
+        )
+
+    with r2:
+
+        st.write(
+            "**Classification Reason:**"
+        )
+
+        st.write(
+            latest.regime.classification_reason
+        )
+
+    st.markdown(
+        "##### Recent Regime Timeline"
+    )
+
+    timeline_df = pd.DataFrame(
+        [
+            {
+                "Date": (
+                    r.timestamp.strftime(
+                        "%Y-%m-%d"
+                    )
+                    if hasattr(
+                        r.timestamp,
+                        "strftime"
+                    )
+                    else str(
+                        r.timestamp
+                    )
+                ),
+
+                "Demand":
+                    f"{r.actual_demand:.2f}",
+
+                "Regime":
+                    r.regime.regime.name,
+
+                "Confidence":
+                    f"{r.regime.confidence * 100:.0f}%",
+
+                "Reason":
+                    r.regime.classification_reason
+            }
+
+            for r in results[-25:]
+        ]
+    )
+
+    st.dataframe(
+        timeline_df,
+        use_container_width=True
+    )
+
+
+# ============================================================
+# EXISTING MODULE 3
+# ============================================================
+
+with t_forecast:
+
+    st.markdown(
+        "#### Adaptive Model Routing & Forecasting"
+    )
+
+    st.write(
+        "**Selection Diagnostic:**"
+    )
+
+    st.write(
+        latest.forecast.selection_reason
+    )
+
+    cand_data = [
+
+        {
+            "Candidate Model":
+                c.model_name,
+
+            "Validation MAE":
+                f"{c.mae:.3f}",
+
+            "Validation RMSE":
+                f"{c.rmse:.3f}",
+
+            "Status":
+                "SELECTED"
+                if c.selected
+                else "BENCHMARK"
+        }
+
+        for c in (
+            latest
+            .forecast
+            .candidate_evals
+        )
+    ]
+
+    if cand_data:
+
+        st.table(
+            pd.DataFrame(
+                cand_data
+            )
+        )
+
+    else:
+
+        st.info(
+            "Model evaluation is still in warmup."
+        )
+
+    st.markdown(
+        "##### Actual vs AERIS Forecast"
+    )
+
+    start_idx = min(
+        warmup,
+        len(dates) - 1
+    )
+
+    fig_f = go.Figure()
+
+    fig_f.add_trace(
+        go.Scatter(
+            x=dates[start_idx:],
+            y=actuals[start_idx:],
+            mode="lines",
+            name="Actual Demand"
+        )
+    )
+
+    fig_f.add_trace(
+        go.Scatter(
+            x=dates[start_idx:],
+            y=preds[start_idx:],
+            mode="lines",
+            name="AERIS Forecast",
+            line=dict(
+                dash="dash",
+                width=2
+            )
+        )
+    )
+
+    fig_f.update_layout(
+        height=420,
+        margin=dict(
+            l=10,
+            r=10,
+            t=30,
+            b=10
+        ),
+        hovermode="x unified",
+        title="Walk-Forward Actual vs Predicted Demand"
+    )
+
+    st.plotly_chart(
+        fig_f,
+        use_container_width=True
+    )
+
+    # --------------------------------------------------------
+    # NEW PS2 MODEL INFORMATION
+    # --------------------------------------------------------
+
+    if st.session_state.api_last_result:
+
+        st.markdown(
+            "##### PS2 Forecasting Strategy"
+        )
+
+        lr1, lr2, lr3 = st.columns(3)
+
+        lr1.metric(
+            "Strategy Used",
+            st.session_state.api_last_result[
+                "forecast_strategy_used"
+            ]
+        )
+
+        lr2.metric(
+            "Selected Model",
+            st.session_state.api_last_result[
+                "model_name"
+            ]
+        )
+
+        lr3.metric(
+            "Next Strategy",
+            st.session_state.api_last_result[
+                "forecast_strategy_next"
+            ]
+        )
+
+
+# ============================================================
+# EXISTING MODULE 4
+# ============================================================
+
+with t_quant:
+
+    st.markdown(
+        "#### Adaptive Conformal Uncertainty Bounds"
+    )
+
+    q1, q2, q3, q4 = st.columns(4)
+
+    q1.metric(
+        "Lower Bound",
+        f"{latest.conformal.lower_bound:.2f}"
+    )
+
+    q2.metric(
+        "Point Forecast",
+        f"{latest.conformal.point_forecast:.2f}"
+    )
+
+    q3.metric(
+        "Upper Bound",
+        f"{latest.conformal.upper_bound:.2f}"
+    )
+
+    q4.metric(
+        "Interval Width",
+        f"{latest.conformal.interval_width:.2f}"
+    )
+
+    fig_q = go.Figure()
+
+    fig_q.add_trace(
+        go.Scatter(
+            x=dates[start_idx:],
+            y=actuals[start_idx:],
+            mode="lines",
+            name="Actual Demand"
+        )
+    )
+
+    fig_q.add_trace(
+        go.Scatter(
+            x=dates[start_idx:],
+            y=preds[start_idx:],
+            mode="lines",
+            name="Point Prediction",
+            line=dict(
+                width=2
+            )
+        )
+    )
+
+    interval_x = (
+        dates[start_idx:]
+        + dates[start_idx:][::-1]
+    )
+
+    interval_y = (
+        uppers[start_idx:]
+        + lowers[start_idx:][::-1]
+    )
+
+    fig_q.add_trace(
+        go.Scatter(
+            x=interval_x,
+            y=interval_y,
+            fill="toself",
+            line=dict(
+                width=0
+            ),
+            name=(
+                f"{int(conformal_cov * 100)}% "
+                "Conformal Interval"
+            )
+        )
+    )
+
+    fig_q.update_layout(
+        height=450,
+        margin=dict(
+            l=10,
+            r=10,
+            t=30,
+            b=10
+        ),
+        hovermode="x unified"
+    )
+
+    st.plotly_chart(
+        fig_q,
+        use_container_width=True
+    )
+
+
+# ============================================================
+# EXISTING ADAPTATION TAB
+# ============================================================
+
+with t_adapt:
+
+    st.markdown(
+        "#### System Adaptation State"
+    )
+
+    a1, a2 = st.columns(2)
+
+    with a1:
+
+        st.metric(
+            "Adaptation Fired",
+            "YES"
+            if latest.adaptation_triggered
+            else "NO"
+        )
+
+        st.metric(
+            "Change Evidence Accumulation",
+            latest.detection.consecutive_warnings
+        )
+
+    with a2:
+
+        st.info(
+            f"""
+            **Adaptation Reason**
+
+            {latest.adaptation_reason}
+            """
+        )
+
+    st.markdown(
+        "##### Adaptation Timeline"
+    )
+
+    adaptation_df = pd.DataFrame(
+        [
+            {
+                "Date": (
+                    r.timestamp.strftime(
+                        "%Y-%m-%d"
+                    )
+                    if hasattr(
+                        r.timestamp,
+                        "strftime"
+                    )
+                    else str(
+                        r.timestamp
+                    )
+                ),
+
+                "Regime":
+                    r.regime.regime.name,
+
+                "Adaptation":
+                    "YES"
+                    if r.adaptation_triggered
+                    else "NO",
+
+                "Reason":
+                    r.adaptation_reason
+            }
+
+            for r in results[-30:]
+        ]
+    )
+
+    st.dataframe(
+        adaptation_df,
+        use_container_width=True
+    )
+
+
+# ============================================================
+# ============================================================
+# NEW PS2 EVALUATION TAB
+# ============================================================
+# ============================================================
+
+with t_ps2:
+
+    st.markdown(
+        "## PS2 SURPRISE CHALLENGE EVALUATION"
+    )
+
+    st.write(
+        "This section evaluates AERIS against the live "
+        "Surprise Challenge stream without changing the "
+        "existing offline AERIS dashboard."
+    )
+
+    # ========================================================
+    # EXPLANATION
+    # ========================================================
+
+    st.info(
+        """
+        **Surprise 2 decision logic**
+
+        1. BOCPD detects whether the observation looks unusual.
+        2. A verification layer checks whether the deviation
+           persists.
+        3. If it returns to baseline before persistence is
+           confirmed, it is classified as a temporary disturbance.
+        4. If it remains abnormal for the required number of
+           observations, it is classified as a persistent change.
+        5. Temporary disturbances keep the existing forecasting
+           strategy.
+        6. Persistent changes activate adaptive forecasting
+           using recent-regime data.
+        """
+    )
+
+    # ========================================================
+    # SESSION CONFIGURATION
+    # ========================================================
+
+    st.markdown(
+        "### 1. SESSION CONFIGURATION"
+    )
+
+    sc1, sc2, sc3 = st.columns(3)
+
+    with sc1:
+
+        team_name = st.text_input(
+            "Team Name",
+            value=st.session_state.api_team_name,
+            disabled=st.session_state.api_started
+        )
+
+    with sc2:
+
+        stream_options = [
+            s
+            for s in [
+                "sc1",
+                "sc2"
+            ]
+            if s not in
+            st.session_state.api_completed_streams
+        ]
+
+        if not stream_options:
+
+            stream_options = [
+                "sc1",
+                "sc2"
+            ]
+
+        selected_stream = st.selectbox(
+            "Challenge Stream",
+            stream_options,
+            index=0,
+            disabled=st.session_state.api_started
+        )
+
+    with sc3:
+
+        st.metric(
+            "Required Persistence",
+            f"{ps2_persistence} observations"
+        )
+
+    # ========================================================
+    # START SESSION
+    # ========================================================
+
+    if not st.session_state.api_started:
+
+        if st.button(
+            "START PS2 SESSION",
+            type="primary",
+            use_container_width=True
+        ):
+
+            if selected_stream in (
+                st.session_state.api_completed_streams
+            ):
+
+                st.error(
+                    "This stream has already been completed "
+                    "in this local session."
+                )
+
+            else:
+
+                try:
+
+                    with st.spinner(
+                        "Starting PS2 session..."
+                    ):
+
+                        session_data = (
+                            api_start_session(
+                                team_name,
+                                selected_stream
+                            )
+                        )
+
+                    # ------------------------------------------------
+                    # Save API session
+                    # ------------------------------------------------
+
+                    session_id = (
+                        session_data.get(
+                            "session_id"
+                        )
+                    )
+
+                    if not session_id:
+
+                        raise RuntimeError(
+                            "API did not return session_id."
+                        )
+
+                    st.session_state.api_session_id = (
+                        session_id
+                    )
+
+                    st.session_state.api_stream = (
+                        selected_stream
+                    )
+
+                    st.session_state.api_team_name = (
+                        team_name
+                    )
+
+                    st.session_state.api_total_rows = (
+                        session_data.get(
+                            "total_rows",
+                            0
+                        )
+                    )
+
+                    st.session_state.api_step = 0
+
+                    st.session_state.api_started = True
+
+                    st.session_state.api_done = False
+
+                    st.session_state.api_current_row = None
+
+                    st.session_state.api_last_result = None
+
+                    # ------------------------------------------------
+                    # Clear histories
+                    # ------------------------------------------------
+
+                    st.session_state.api_rows = []
+
+                    st.session_state.api_actual_history = []
+
+                    st.session_state.api_prediction_history = []
+
+                    st.session_state.api_error_history = []
+
+                    st.session_state.api_abs_error_history = []
+
+                    st.session_state.api_regime_history = []
+
+                    st.session_state.api_adaptation_history = []
+
+                    st.session_state.api_verification_history = []
+
+                    st.session_state.api_change_probability_history = []
+
+                    st.session_state.api_run_length_history = []
+
+                    st.session_state.api_detector_status_history = []
+
+                    st.session_state.api_interval_lower_history = []
+
+                    st.session_state.api_interval_upper_history = []
+
+                    # ------------------------------------------------
+                    # Initialize persistent monitoring
+                    #
+                    # Training data is replayed ONCE here.
+                    # ------------------------------------------------
+
+                    initialize_ps2_monitoring(
+                        raw_df
+                    )
+
+                    st.success(
+                        f"{selected_stream.upper()} session started."
+                    )
+
+                    st.rerun()
+
+                except Exception as e:
+
+                    st.error(
+                        f"Could not start PS2 session: {e}"
+                    )
+
+                    if "403" in str(e):
+
+                        st.warning(
+                            "The stream may not be open yet. "
+                            "Do not repeatedly create sessions. "
+                            "Wait until the challenge stream is available."
+                        )
+
+    else:
+
+        # ====================================================
+        # ACTIVE SESSION
+        # ====================================================
+
+        st.success(
+            f"""
+            Active session:
+            `{st.session_state.api_stream.upper()}`
+
+            Session ID:
+            `{st.session_state.api_session_id}`
+
+            Total rows:
+            `{st.session_state.api_total_rows}`
+            """
+        )
+
+        # ====================================================
+        # GET NEXT ROW
+        # ====================================================
+
+        st.markdown(
+            "### 2. GET NEXT OBSERVATION"
+        )
+
+        if (
+            st.session_state.api_current_row
+            is None
+            and not st.session_state.api_done
+        ):
+
+            if st.button(
+                "GET NEXT ROW",
+                type="primary",
+                use_container_width=True
+            ):
+
+                try:
+
+                    with st.spinner(
+                        "Requesting next observation..."
+                    ):
+
+                        next_data = (
+                            api_get_next(
+                                st.session_state.api_session_id
+                            )
+                        )
+
+                    # ------------------------------------------------
+                    # Store exactly one current row.
+                    # ------------------------------------------------
+
+                    row = {}
+
+                    for key, value in next_data.items():
+
+                        row[key] = value
+
+                    # Some API versions may return a nested row.
+                    if "data" in next_data and isinstance(
+                        next_data["data"],
+                        dict
+                    ):
+
+                        row = next_data["data"]
+
+                    st.session_state.api_current_row = (
+                        row
+                    )
+
+                    st.rerun()
+
+                except Exception as e:
+
+                    st.error(
+                        f"Could not get next row: {e}"
+                    )
+
+        # ====================================================
+        # CURRENT HIDDEN OBSERVATION
+        # ====================================================
+
+        if (
+            st.session_state.api_current_row
+            is not None
+        ):
+
+            current_row = (
+                st.session_state.api_current_row
+            )
+
+            st.markdown(
+                "### CURRENT OBSERVATION"
+            )
+
+            feature_values = {}
+
+            for feature in API_FEATURES:
+
+                if feature in current_row:
+
+                    feature_values[
+                        feature
+                    ] = current_row[
+                        feature
+                    ]
+
+            if feature_values:
+
+                feature_cols = st.columns(
+                    min(
+                        3,
+                        len(feature_values)
+                    )
+                )
+
+                for idx, (
+                    feature,
+                    value
+                ) in enumerate(
+                    feature_values.items()
+                ):
+
+                    with feature_cols[
+                        idx % len(feature_cols)
+                    ]:
+
+                        st.metric(
+                            feature,
+                            f"{float(value):.4f}"
+                            if pd.notna(value)
+                            else "N/A"
+                        )
+
+            st.warning(
+                "The target value is hidden until a prediction "
+                "is submitted."
+            )
+
+            # ========================================================
+            # PREDICT
+            # ========================================================
+
+            st.markdown(
+                "### 3. FORECAST BEFORE ACTUAL"
+            )
+
+            strategy_used = (
+                st.session_state.api_forecast_strategy
+            )
+
+            # --------------------------------------------------------
+            # Build history from training + previously revealed API
+            # values.
+            # --------------------------------------------------------
+
+            history_df = raw_df.copy()
+
+            if (
+                st.session_state.api_rows
+                and
+                st.session_state.api_actual_history
+            ):
+
+                revealed_rows = []
+
+                for idx, row_data in enumerate(
+                    st.session_state.api_rows
+                ):
+
+                    row_copy = dict(
+                        row_data
+                    )
+
+                    row_copy["target"] = (
+                        st.session_state.api_actual_history[
+                            idx
+                        ]
+                    )
+
+                    revealed_rows.append(
+                        row_copy
+                    )
+
+                if revealed_rows:
+
+                    revealed_df = pd.DataFrame(
+                        revealed_rows
+                    )
+
+                    history_df = pd.concat(
+                        [
+                            history_df,
+                            revealed_df
+                        ],
+                        ignore_index=True
+                    )
+
+            if st.button(
+                "PREDICT & SUBMIT",
+                type="primary",
+                use_container_width=True
+            ):
+
+                try:
+
+                    # ====================================================
+                    # STEP A
+                    # Forecast using CURRENT strategy.
+                    #
+                    # Current actual is NOT known yet.
+                    # ====================================================
+
+                    with st.spinner(
+                        f"Forecasting using {strategy_used} strategy..."
+                    ):
+
+                        (
+                            prediction,
+                            model_name,
+                            candidate_evals,
+                            model_meta
+                        ) = predict_api_row(
+                            history_df,
+                            current_row,
+                            validation_days=forecast_win,
+                            strategy=strategy_used,
+                            recent_window=ps2_recent_window
+                        )
+
+                    if prediction is None:
+
+                        raise RuntimeError(
+                            "Could not generate a forecast."
+                        )
+
+                    # ====================================================
+                    # STEP B
+                    # Calculate conformal interval BEFORE actual reveal.
+                    # ====================================================
+
+                    radius = (
+                        calculate_conformal_radius(
+                            history_df,
+                            validation_days=forecast_win,
+                            calibration_window=calib_win,
+                            coverage=conformal_cov,
+                            previous_api_errors=
+                                st.session_state.api_abs_error_history
+                        )
+                    )
+
+                    lower_bound = max(
+                        0.0,
+                        prediction - radius
+                    )
+
+                    upper_bound = (
+                        prediction + radius
+                    )
+
+                    # ====================================================
+                    # STEP C
+                    # Submit prediction to API.
+                    # This reveals actual.
+                    # ====================================================
+
+                    with st.spinner(
+                        "Submitting prediction..."
+                    ):
+
+                        prediction_response = (
+                            api_submit_prediction(
+                                st.session_state.api_session_id,
+                                prediction
+                            )
+                        )
+
+                    # ====================================================
+                    # STEP D
+                    # Extract actual.
+                    # ====================================================
+
+                    actual = (
+                        prediction_response.get(
+                            "actual_target"
+                        )
+                    )
+
+                    if actual is None:
+
+                        actual = (
+                            prediction_response.get(
+                                "target"
+                            )
+                        )
+
+                    if actual is None:
+
+                        actual = (
+                            prediction_response.get(
+                                "actual"
+                            )
+                        )
+
+                    if actual is None:
+
+                        raise RuntimeError(
+                            "API did not return the revealed actual target."
+                        )
+
+                    actual = float(
+                        actual
+                    )
+
+                    # ====================================================
+                    # STEP E
+                    # ERROR
+                    # ====================================================
+
+                    signed_error = (
+                        prediction
+                        - actual
+                    )
+
+                    absolute_error = abs(
+                        signed_error
+                    )
+
+                    # ====================================================
+                    # STEP F
+                    # UPDATE BOCPD EXACTLY ONCE.
+                    #
+                    # No recreation.
+                    # No second replay.
+                    # ====================================================
+
+                    detector = (
+                        st.session_state.api_detector
+                    )
+
+                    if detector is None:
+
+                        initialize_ps2_monitoring(
+                            raw_df
+                        )
+
+                        detector = (
+                            st.session_state.api_detector
+                        )
+
+                    detection = detector.update(
+                        actual
+                    )
+
+                    # ====================================================
+                    # STEP G
+                    # UPDATE REGIME CLASSIFIER ONCE.
+                    # ====================================================
+
+                    classifier = (
+                        st.session_state.api_classifier
+                    )
+
+                    if classifier is None:
+
+                        classifier = (
+                            create_ps2_classifier()
+                        )
+
+                        st.session_state.api_classifier = (
+                            classifier
+                        )
+
+                    regime_result = (
+                        classifier.classify(
+                            detection
+                        )
+                    )
+
+                    regime_name = (
+                        safe_regime_name(
+                            regime_result
+                        )
+                    )
+
+                    regime_confidence = float(
+                        getattr(
+                            regime_result,
+                            "confidence",
+                            0.0
+                        )
+                    )
+
+                    regime_reason = (
+                        safe_regime_reason(
+                            regime_result
+                        )
+                    )
+
+                    # ====================================================
+                    # STEP H
+                    # CHANGE VERIFICATION
+                    #
+                    # The historical values passed here do NOT include
+                    # current actual yet.
+                    #
+                    # This means current prediction was not influenced
+                    # by current actual.
+                    # ====================================================
+
+                    previous_verification_state = (
+                        st.session_state.api_verification_state
+                    )
+
+                    verification = (
+                        verify_change(
+                            historical_values=(
+                                history_df[
+                                    "target"
+                                ]
+                                .dropna()
+                                .astype(float)
+                                .tolist()
+                            ),
+
+                            current_value=actual,
+
+                            change_probability=
+                                get_change_probability(
+                                    detection
+                                ),
+
+                            candidate_start=
+                                st.session_state.api_candidate_start,
+
+                            candidate_values=
+                                st.session_state.api_candidate_values,
+
+                            baseline_mean=
+                                st.session_state.api_baseline_mean,
+
+                            baseline_std=
+                                st.session_state.api_baseline_std
+                        )
+                    )
+
+                    verification_state = (
+                        verification[
+                            "state"
+                        ]
+                    )
+
+                    # ----------------------------------------------------
+                    # Save verification state
+                    # ----------------------------------------------------
+
+                    st.session_state.api_verification_state = (
+                        verification_state
+                    )
+
+                    st.session_state.api_candidate_start = (
+                        verification[
+                            "candidate_start"
+                        ]
+                    )
+
+                    st.session_state.api_candidate_values = (
+                        verification[
+                            "candidate_values"
+                        ]
+                    )
+
+                    st.session_state.api_baseline_mean = (
+                        verification[
+                            "baseline_mean"
+                        ]
+                    )
+
+                    st.session_state.api_baseline_std = (
+                        verification[
+                            "baseline_std"
+                        ]
+                    )
+
+                    # ====================================================
+                    # STEP I
+                    # ADAPTATION DECISION
+                    # ====================================================
+
+                    (
+                        should_adapt,
+                        adaptation_reason
+                    ) = decide_adaptation(
+                        verification_state
+                    )
+
+                    entered_persistent = (
+                        verification_state
+                        == "PERSISTENT"
+                        and
+                        previous_verification_state
+                        != "PERSISTENT"
+                    )
+
+                    adaptation_triggered = (
+                        should_adapt
+                        and
+                        entered_persistent
+                    )
+
+                    # ----------------------------------------------------
+                    # Strategy for NEXT prediction
+                    # ----------------------------------------------------
+
+                    if should_adapt:
+
+                        next_strategy = (
+                            "ADAPTIVE"
+                        )
+
+                    else:
+
+                        next_strategy = (
+                            st.session_state.api_forecast_strategy
+                        )
+
+                    # ----------------------------------------------------
+                    # If temporary:
+                    # HOLD current strategy.
+                    # ----------------------------------------------------
+
+                    if (
+                        verification_state
+                        == "TEMPORARY DISTURBANCE"
+                    ):
+
+                        next_strategy = (
+                            st.session_state.api_forecast_strategy
+                        )
+
+                    # ----------------------------------------------------
+                    # If candidate/verification:
+                    # HOLD current strategy.
+                    # ----------------------------------------------------
+
+                    if verification_state in [
+                        "CANDIDATE",
+                        "VERIFYING"
+                    ]:
+
+                        next_strategy = (
+                            st.session_state.api_forecast_strategy
+                        )
+
+                    st.session_state.api_forecast_strategy = (
+                        next_strategy
+                    )
+
+                    # ====================================================
+                    # STEP J
+                    # SAVE HISTORIES
+                    # ====================================================
+
+                    st.session_state.api_rows.append(
+                        current_row
+                    )
+
+                    st.session_state.api_actual_history.append(
+                        actual
+                    )
+
+                    st.session_state.api_prediction_history.append(
+                        prediction
+                    )
+
+                    st.session_state.api_error_history.append(
+                        signed_error
+                    )
+
+                    st.session_state.api_abs_error_history.append(
+                        absolute_error
+                    )
+
+                    st.session_state.api_regime_history.append(
+                        regime_name
+                    )
+
+                    st.session_state.api_adaptation_history.append(
+                        bool(adaptation_triggered)
+                    )
+
+                    st.session_state.api_verification_history.append(
+                        verification_state
+                    )
+
+                    st.session_state.api_change_probability_history.append(
+                        get_change_probability(
+                            detection
+                        )
+                    )
+
+                    st.session_state.api_run_length_history.append(
+                        get_map_run_length(
+                            detection
+                        )
+                    )
+
+                    st.session_state.api_detector_status_history.append(
+                        get_detector_status(
+                            detection
+                        )
+                    )
+
+                    st.session_state.api_interval_lower_history.append(
+                        lower_bound
+                    )
+
+                    st.session_state.api_interval_upper_history.append(
+                        upper_bound
+                    )
+
+                    # ====================================================
+                    # STEP K
+                    # RESULT LOG
+                    # ====================================================
+
+                    result_record = {
+
+                        "step":
+                            len(
+                                st.session_state
+                                .api_actual_history
+                            ),
+
+                        "timestamp":
+                            current_row.get(
+                                "timestamp",
+                                ""
+                            ),
+
+                        "actual":
+                            actual,
+
+                        "prediction":
+                            prediction,
+
+                        "error":
+                            signed_error,
+
+                        "absolute_error":
+                            absolute_error,
+
+                        "model_name":
+                            model_name,
+
+                        "forecast_strategy_used":
+                            strategy_used,
+
+                        "forecast_strategy_next":
+                            next_strategy,
+
+                        "lower_bound":
+                            lower_bound,
+
+                        "upper_bound":
+                            upper_bound,
+
+                        "interval_radius":
+                            radius,
+
+                        "coverage":
+                            conformal_cov,
+
+                        "change_probability":
+                            get_change_probability(
+                                detection
+                            ),
+
+                        "map_run_length":
+                            get_map_run_length(
+                                detection
+                            ),
+
+                        "detector_status":
+                            get_detector_status(
+                                detection
+                            ),
+
+                        "verification_state":
+                            verification_state,
+
+                        "persistence_count":
+                            verification[
+                                "persistence_count"
+                            ],
+
+                        "baseline_mean":
+                            verification[
+                                "baseline_mean"
+                            ],
+
+                        "baseline_std":
+                            verification[
+                                "baseline_std"
+                            ],
+
+                        "outside_baseline":
+                            verification[
+                                "outside_baseline"
+                            ],
+
+                        "bocpd_support":
+                            verification[
+                                "bocpd_support"
+                            ],
+
+                        "regime":
+                            regime_name,
+
+                        "regime_confidence":
+                            regime_confidence,
+
+                        "regime_reason":
+                            regime_reason,
+
+                        "adaptation_triggered":
+                            adaptation_triggered,
+
+                        "adaptation_reason":
+                            adaptation_reason
+                    }
+
+                    st.session_state.api_last_result = (
+                        result_record
+                    )
+
+                    # ====================================================
+                    # STEP L
+                    # CHECK COMPLETION
+                    # ====================================================
+
+                    rows_processed = len(
+                        st.session_state.api_actual_history
+                    )
+
+                    total_rows = (
+                        st.session_state.api_total_rows
+                    )
+
+                    if (
+                        total_rows
+                        and
+                        rows_processed
+                        >= total_rows
+                    ):
+
+                        st.session_state.api_done = True
+
+                        if (
+                            st.session_state.api_stream
+                            not in
+                            st.session_state.api_completed_streams
+                        ):
+
+                            st.session_state.api_completed_streams.append(
+                                st.session_state.api_stream
+                            )
+
+                    # ====================================================
+                    # CLEAR CURRENT ROW
+                    # ====================================================
+
+                    st.session_state.api_current_row = None
+
+                    st.rerun()
+
+                except Exception as e:
+
+                    st.error(
+                        f"Prediction/evaluation error: {e}"
+                    )
+
+        # ====================================================
+        # CURRENT PS2 STATE
+        # ====================================================
+
+        st.markdown(
+            "---"
+        )
+
+        st.markdown(
+            "### 4. SURPRISE 2 DECISION STATE"
+        )
+
+        state = (
+            st.session_state.api_verification_state
+        )
+
+        if state == "NORMAL":
+
+            st.success(
+                """
+                NORMAL
+
+                No confirmed deviation is currently active.
+                """
+            )
+
+        elif state == "CANDIDATE":
+
+            st.warning(
+                """
+                CANDIDATE CHANGE
+
+                BOCPD/statistical evidence suggests something
+                unusual may have happened. Persistence is not
+                confirmed yet.
+                """
+            )
+
+        elif state == "VERIFYING":
+
+            st.warning(
+                """
+                VERIFYING
+
+                The deviation is still present, but the required
+                persistence threshold has not yet been reached.
+
+                Forecasting strategy remains unchanged.
+                """
+            )
+
+        elif state == "TEMPORARY DISTURBANCE":
+
+            st.info(
+                """
+                TEMPORARY DISTURBANCE
+
+                The unusual observation returned to the previous
+                baseline before persistence was confirmed.
+
+                The existing forecasting strategy was retained.
+                """
+            )
+
+        elif state == "PERSISTENT":
+
+            st.error(
+                """
+                PERSISTENT CHANGE
+
+                The deviation remained outside the frozen baseline
+                for the required number of observations.
+
+                Adaptive forecasting is now active.
+                """
+            )
+
+        if st.session_state.api_last_result:
+
+            latest_ps2 = (
+                st.session_state.api_last_result
+            )
+
+            v1, v2, v3, v4 = st.columns(4)
+
+            v1.metric(
+                "P(Change)",
+                f"{latest_ps2['change_probability']:.3f}"
+            )
+
+            v2.metric(
+                "Persistence",
+                (
+                    f"{latest_ps2['persistence_count']}"
+                    f"/{ps2_persistence}"
+                )
+            )
+
+            v3.metric(
+                "Verification",
+                latest_ps2[
+                    "verification_state"
+                ]
+            )
+
+            v4.metric(
+                "Next Forecast Strategy",
+                latest_ps2[
+                    "forecast_strategy_next"
+                ]
+            )
+
+            st.write(
+                "**Verification Reason:**"
+            )
+
+            st.write(
+                latest_ps2[
+                    "adaptation_reason"
+                ]
+            )
+
+            if (
+                latest_ps2[
+                    "baseline_mean"
+                ]
+                is not None
+            ):
+
+                b1, b2, b3 = st.columns(3)
+
+                b1.metric(
+                    "Frozen Baseline Mean",
+                    f"{latest_ps2['baseline_mean']:.3f}"
+                )
+
+                b2.metric(
+                    "Frozen Baseline Std",
+                    f"{latest_ps2['baseline_std']:.3f}"
+                )
+
+                baseline_low = (
+                    latest_ps2[
+                        "baseline_mean"
+                    ]
+                    -
+                    2 *
+                    latest_ps2[
+                        "baseline_std"
+                    ]
+                )
+
+                baseline_high = (
+                    latest_ps2[
+                        "baseline_mean"
+                    ]
+                    +
+                    2 *
+                    latest_ps2[
+                        "baseline_std"
+                    ]
+                )
+
+                b3.metric(
+                    "Baseline Range",
+                    (
+                        f"{baseline_low:.2f} "
+                        f"to "
+                        f"{baseline_high:.2f}"
+                    )
+                )
+
+        # ====================================================
+        # LIVE METRICS
+        # ====================================================
+
+        if st.session_state.api_actual_history:
+
+            st.markdown(
+                "### 5. LIVE EVALUATION"
+            )
+
+            actual_array = np.asarray(
+                st.session_state.api_actual_history,
+                dtype=float
+            )
+
+            prediction_array = np.asarray(
+                st.session_state.api_prediction_history,
+                dtype=float
+            )
+
+            errors_array = np.asarray(
+                st.session_state.api_abs_error_history,
+                dtype=float
+            )
+
+            live_mae = float(
+                np.mean(
+                    errors_array
+                )
+            )
+
+            latest_error = float(
+                errors_array[-1]
+            )
+
+            temporary_count = (
+                st.session_state
+                .api_verification_history
+                .count(
+                    "TEMPORARY DISTURBANCE"
+                )
+            )
+
+            persistent_count = (
+                st.session_state
+                .api_verification_history
+                .count(
+                    "PERSISTENT"
+                )
+            )
+
+            adaptation_count = sum(
+                st.session_state
+                .api_adaptation_history
+            )
+
+            m1, m2, m3, m4, m5 = st.columns(5)
+
+            m1.metric(
+                "Rows Evaluated",
+                len(actual_array)
+            )
+
+            m2.metric(
+                "Current MAE",
+                f"{live_mae:.3f}"
+            )
+
+            m3.metric(
+                "Latest Absolute Error",
+                f"{latest_error:.3f}"
+            )
+
+            m4.metric(
+                "Temporary Disturbances",
+                temporary_count
+            )
+
+            m5.metric(
+                "Confirmed Changes",
+                persistent_count
+            )
+
+            # =================================================
+            # PREDICTION VS ACTUAL
+            # =================================================
+
+            st.markdown(
+                "#### Prediction vs Actual"
+            )
+
+            fig_live = go.Figure()
+
+            fig_live.add_trace(
+                go.Scatter(
+                    x=list(
+                        range(
+                            1,
+                            len(actual_array) + 1
+                        )
+                    ),
+                    y=actual_array,
+                    mode="lines+markers",
+                    name="Actual"
+                )
+            )
+
+            fig_live.add_trace(
+                go.Scatter(
+                    x=list(
+                        range(
+                            1,
+                            len(prediction_array) + 1
+                        )
+                    ),
+                    y=prediction_array,
+                    mode="lines+markers",
+                    name="Prediction",
+                    line=dict(
+                        dash="dash"
+                    )
+                )
+            )
+
+            # -------------------------------------------------
+            # Conformal interval
+            # -------------------------------------------------
+
+            lower_values = (
+                st.session_state
+                .api_interval_lower_history
+            )
+
+            upper_values = (
+                st.session_state
+                .api_interval_upper_history
+            )
+
+            x_values = list(
+                range(
+                    1,
+                    len(actual_array) + 1
+                )
+            )
+
+            interval_x = (
+                x_values
+                +
+                x_values[::-1]
+            )
+
+            interval_y = (
+                upper_values
+                +
+                lower_values[::-1]
+            )
+
+            fig_live.add_trace(
+                go.Scatter(
+                    x=interval_x,
+                    y=interval_y,
+                    fill="toself",
+                    line=dict(
+                        width=0
+                    ),
+                    name=(
+                        f"{int(conformal_cov * 100)}% "
+                        "Conformal Interval"
+                    )
+                )
+            )
+
+            fig_live.update_layout(
+                height=450,
+                hovermode="x unified",
+                xaxis_title="Evaluation Step",
+                yaxis_title="Target"
+            )
+
+            st.plotly_chart(
+                fig_live,
+                use_container_width=True
+            )
+
+            # =================================================
+            # ERROR GRAPH
+            # =================================================
+
+            st.markdown(
+                "#### Forecast Error"
+            )
+
+            fig_error = go.Figure()
+
+            fig_error.add_trace(
+                go.Scatter(
+                    x=list(
+                        range(
+                            1,
+                            len(
+                                st.session_state
+                                .api_error_history
+                            )
+                            + 1
+                        )
+                    ),
+                    y=(
+                        st.session_state
+                        .api_error_history
+                    ),
+                    mode="lines+markers",
+                    name="Signed Error"
+                )
+            )
+
+            fig_error.add_hline(
+                y=0,
+                line_dash="dot"
+            )
+
+            fig_error.update_layout(
+                height=350,
+                xaxis_title="Evaluation Step",
+                yaxis_title="Prediction - Actual"
+            )
+
+            st.plotly_chart(
+                fig_error,
+                use_container_width=True
+            )
+
+            # =================================================
+            # P CHANGE
+            # =================================================
+
+            st.markdown(
+                "#### BOCPD Change Probability"
+            )
+
+            fig_prob = go.Figure()
+
+            fig_prob.add_trace(
+                go.Scatter(
+                    x=x_values,
+                    y=(
+                        st.session_state
+                        .api_change_probability_history
+                    ),
+                    mode="lines+markers",
+                    name="P(Change)"
+                )
+            )
+
+            fig_prob.add_hline(
+                y=p_thresh,
+                line_dash="dot",
+                annotation_text="Change Threshold"
+            )
+
+            fig_prob.add_hline(
+                y=ps2_watch_threshold,
+                line_dash="dash",
+                annotation_text="Watch Threshold"
+            )
+
+            fig_prob.update_layout(
+                height=350,
+                yaxis_title="P(Change)",
+                xaxis_title="Evaluation Step"
+            )
+
+            st.plotly_chart(
+                fig_prob,
+                use_container_width=True
+            )
+
+            # =================================================
+            # VERIFICATION STATE COUNTS
+            # =================================================
+
+            st.markdown(
+                "#### Verification State Timeline"
+            )
+
+            verification_df = pd.DataFrame(
+                {
+                    "Step":
+                        x_values,
+
+                    "Verification State":
+                        (
+                            st.session_state
+                            .api_verification_history
+                        ),
+
+                    "P(Change)":
+                        (
+                            st.session_state
+                            .api_change_probability_history
+                        ),
+
+                    "MAP Run Length":
+                        (
+                            st.session_state
+                            .api_run_length_history
+                        ),
+
+                    "Detector Status":
+                        (
+                            st.session_state
+                            .api_detector_status_history
+                        ),
+
+                    "Regime":
+                        (
+                            st.session_state
+                            .api_regime_history
+                        ),
+
+                    "Prediction":
+                        (
+                            st.session_state
+                            .api_prediction_history
+                        ),
+
+                    "Actual":
+                        (
+                            st.session_state
+                            .api_actual_history
+                        ),
+
+                    "Absolute Error":
+                        (
+                            st.session_state
+                            .api_abs_error_history
+                        ),
+
+                    "Strategy":
+                        [
+                            result[
+                                "forecast_strategy_used"
+                            ]
+                            for result in
+                            [
+                                # Use stored results below
+                                st.session_state.api_last_result
+                            ]
+                            if result is not None
+                        ]
+                }
+            )
+
+            # ------------------------------------------------
+            # Rebuild clean history table because Strategy
+            # requires every result, not only latest.
+            # ------------------------------------------------
+
+            history_records = []
+
+            for idx in range(
+                len(actual_array)
+            ):
+
+                history_records.append(
+                    {
+                        "Step":
+                            idx + 1,
+
+                        "Prediction":
+                            st.session_state
+                            .api_prediction_history[
+                                idx
+                            ],
+
+                        "Actual":
+                            st.session_state
+                            .api_actual_history[
+                                idx
+                            ],
+
+                        "Absolute Error":
+                            st.session_state
+                            .api_abs_error_history[
+                                idx
+                            ],
+
+                        "P(Change)":
+                            st.session_state
+                            .api_change_probability_history[
+                                idx
+                            ],
+
+                        "MAP Run Length":
+                            st.session_state
+                            .api_run_length_history[
+                                idx
+                            ],
+
+                        "Detector Status":
+                            st.session_state
+                            .api_detector_status_history[
+                                idx
+                            ],
+
+                        "Verification":
+                            st.session_state
+                            .api_verification_history[
+                                idx
+                            ],
+
+                        "Regime":
+                            st.session_state
+                            .api_regime_history[
+                                idx
+                            ]
+                    }
+                )
+
+            history_table = pd.DataFrame(
+                history_records
+            )
+
+            st.dataframe(
+                history_table,
+                use_container_width=True
+            )
+
+            # =================================================
+            # ADAPTATION LOG
+            # =================================================
+
+            st.markdown(
+                "#### Adaptation Log"
+            )
+
+            adaptation_records = []
+
+            for idx, triggered in enumerate(
+                st.session_state.api_adaptation_history
+            ):
+
+                adaptation_records.append(
+                    {
+                        "Step":
+                            idx + 1,
+
+                        "Adaptation":
+                            "YES"
+                            if triggered
+                            else "NO",
+
+                        "Verification":
+                            st.session_state
+                            .api_verification_history[
+                                idx
+                            ],
+
+                        "Strategy":
+                            (
+                                "ADAPTIVE"
+                                if (
+                                    triggered
+                                )
+                                else
+                                "HELD"
+                            )
+                    }
+                )
+
+            st.dataframe(
+                pd.DataFrame(
+                    adaptation_records
+                ),
+                use_container_width=True
+            )
+
+        # ====================================================
+        # SESSION COMPLETE
+        # ====================================================
+
+        if st.session_state.api_done:
+
+            st.success(
+                f"""
+                {st.session_state.api_stream.upper()}
+                evaluation completed.
+
+                Rows evaluated:
+                {len(st.session_state.api_actual_history)}
+
+                Confirmed persistent changes:
+                {
+                    st.session_state
+                    .api_verification_history
+                    .count("PERSISTENT")
+                }
+
+                Temporary disturbances:
+                {
+                    st.session_state
+                    .api_verification_history
+                    .count("TEMPORARY DISTURBANCE")
+                }
+
+                Adaptation events:
+                {
+                    sum(
+                        st.session_state
+                        .api_adaptation_history
+                    )
+                }
+                """
+            )
+
+            remaining_streams = [
+                s
+                for s in [
+                    "sc1",
+                    "sc2"
+                ]
+                if s not in
+                st.session_state.api_completed_streams
+            ]
+
+            if remaining_streams:
+
+                st.info(
+                    "The completed stream cannot be started "
+                    "again in this local session. "
+                    "You can evaluate the remaining stream."
+                )
+
+                if st.button(
+                    "START REMAINING STREAM",
+                    use_container_width=True
+                ):
+
+                    # Preserve completed stream record
+                    completed = list(
+                        st.session_state.api_completed_streams
+                    )
+
+                    reset_ps2_state()
+
+                    st.session_state.api_completed_streams = (
+                        completed
+                    )
+
+                    st.rerun()
+
+
+# ============================================================
+# DATASET INFO
+# ============================================================
+
+with t_data:
+
+    st.markdown(
+        "#### Dataset Inspection"
+    )
+
+    d1, d2, d3, d4 = st.columns(4)
+
+    d1.metric(
+        "Total Records",
+        len(raw_df)
+    )
+
+    d2.metric(
+        "Columns",
+        len(raw_df.columns)
+    )
+
+    d3.metric(
+        "Missing Values",
+        int(
+            raw_df.isnull()
+            .sum()
+            .sum()
+        )
+    )
+
+    # --------------------------------------------------------
+    # Detect sampling frequency
+    # --------------------------------------------------------
+
+    if "timestamp" in raw_df.columns:
+
+        try:
+
+            diffs = (
+                raw_df["timestamp"]
+                .dropna()
+                .sort_values()
+                .diff()
+                .dropna()
+            )
+
+            if len(diffs) > 0:
+
+                median_days = (
+                    diffs
+                    .dt.total_seconds()
+                    .median()
+                    / 86400
+                )
+
+                if (
+                    0.8
+                    <= median_days
+                    <= 1.2
+                ):
+
+                    frequency = "Daily"
+
+                elif (
+                    6
+                    <= median_days
+                    <= 8
+                ):
+
+                    frequency = "Weekly"
+
+                elif (
+                    27
+                    <= median_days
+                    <= 32
+                ):
+
+                    frequency = "Monthly"
+
+                else:
+
+                    frequency = (
+                        f"{median_days:.1f} days"
+                    )
+
+            else:
+
+                frequency = "Unknown"
+
+        except Exception:
+
+            frequency = "Unknown"
+
+    else:
+
+        frequency = "Unknown"
+
+    d4.metric(
+        "Sampling Frequency",
+        frequency
+    )
+
+    st.markdown(
+        "##### Dataset Preview"
+    )
+
+    st.dataframe(
+        raw_df.head(15),
+        use_container_width=True
+    )
+
+    st.markdown(
+        "##### Dataset Statistics"
+    )
+
+    st.dataframe(
+        raw_df.describe(
+            include="all"
+        ),
+        use_container_width=True
+    )
+
+
+# ============================================================
+# FOOTER
+# ============================================================
+
+st.markdown("---")
+
+st.caption(
+    "AERIS | Adaptive Electricity Regime Intelligence System | "
+    "DETECT → UNDERSTAND → ROUTE → QUANTIFY → ADAPT"
+)
