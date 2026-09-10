@@ -1,0 +1,727 @@
+
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+
+
+# ============================================================
+# AERIS - VISUAL WORKING DEMONSTRATION
+# ============================================================
+#
+# This is a standalone demonstration.
+# It does NOT modify app.py or any AERIS module.
+#
+# It visually demonstrates:
+#
+# NORMAL
+#     ↓
+# CANDIDATE
+#     ↓
+# VERIFYING
+#     ↓
+# PERSISTENT
+#     ↓
+# ADAPTIVE
+#     ↓
+# RECOVERING
+#     ↓
+# RECOVERED
+#     ↓
+# BASELINE
+#
+# ============================================================
+
+
+# ------------------------------------------------------------
+# SIMULATED OBSERVATIONS
+# ------------------------------------------------------------
+#
+# Normal values are around 100.
+#
+# Then an unexpected deviation appears.
+#
+# IMPORTANT:
+# The program does NOT know beforehand how long
+# the deviation will last.
+#
+# It simply reacts to each new observation.
+# ------------------------------------------------------------
+
+observations = [
+    100,
+    102,
+    98,
+    101,
+    99,
+
+    # Sudden unusual behaviour
+    135,
+    140,
+    138,
+    142,
+    137,
+
+    # Returning to the original baseline
+    105,
+    102,
+    100,
+
+    # Normal operation
+    101,
+    99,
+    103,
+    100,
+]
+
+
+# ------------------------------------------------------------
+# CONFIGURATION
+# ------------------------------------------------------------
+
+BASELINE_MEAN = 100
+
+BASELINE_LOWER = 90
+BASELINE_UPPER = 110
+
+PERSISTENCE_REQUIRED = 3
+RECOVERY_REQUIRED = 2
+
+
+# ------------------------------------------------------------
+# STATE VARIABLES
+# ------------------------------------------------------------
+
+state = "NORMAL"
+
+strategy = "BASELINE"
+
+abnormal_count = 0
+recovery_count = 0
+
+event_start = None
+event_end = None
+
+event_id = 0
+
+
+# ------------------------------------------------------------
+# HISTORY
+# ------------------------------------------------------------
+
+value_history = []
+state_history = []
+strategy_history = []
+abnormal_history = []
+recovery_history = []
+
+
+# ------------------------------------------------------------
+# STATE COLOURS
+# ------------------------------------------------------------
+
+state_colors = {
+    "NORMAL": "green",
+    "CANDIDATE": "orange",
+    "VERIFYING": "orange",
+    "PERSISTENT": "red",
+    "RECOVERING": "purple",
+    "RECOVERED": "blue",
+}
+
+
+# ------------------------------------------------------------
+# CHECK BASELINE
+# ------------------------------------------------------------
+
+def inside_baseline(value):
+    return BASELINE_LOWER <= value <= BASELINE_UPPER
+
+
+# ------------------------------------------------------------
+# PROCESS ONE OBSERVATION
+# ------------------------------------------------------------
+
+def process_observation(step, value):
+
+    global state
+    global strategy
+    global abnormal_count
+    global recovery_count
+    global event_start
+    global event_end
+    global event_id
+
+    outside = not inside_baseline(value)
+
+
+    # ========================================================
+    # NORMAL
+    # ========================================================
+
+    if state == "NORMAL":
+
+        if outside:
+
+            event_id += 1
+
+            event_start = step
+
+            abnormal_count = 1
+
+            state = "CANDIDATE"
+
+            strategy = "BASELINE"
+
+            reason = (
+                "Unusual observation detected.\n"
+                "AERIS starts verification."
+            )
+
+        else:
+
+            reason = (
+                "Observation is inside the\n"
+                "normal baseline."
+            )
+
+
+    # ========================================================
+    # CANDIDATE
+    # ========================================================
+
+    elif state == "CANDIDATE":
+
+        if outside:
+
+            abnormal_count += 1
+
+            if abnormal_count >= PERSISTENCE_REQUIRED:
+
+                state = "PERSISTENT"
+
+                strategy = "ADAPTIVE"
+
+                reason = (
+                    f"Deviation persisted for "
+                    f"{abnormal_count} observations.\n"
+                    "Persistent change confirmed.\n"
+                    "Forecasting strategy adapted."
+                )
+
+            else:
+
+                state = "VERIFYING"
+
+                reason = (
+                    f"More evidence required.\n"
+                    f"Evidence: {abnormal_count}/"
+                    f"{PERSISTENCE_REQUIRED}"
+                )
+
+        else:
+
+            state = "NORMAL"
+
+            strategy = "BASELINE"
+
+            abnormal_count = 0
+
+            reason = (
+                "Deviation disappeared.\n"
+                "No persistent change confirmed."
+            )
+
+
+    # ========================================================
+    # VERIFYING
+    # ========================================================
+
+    elif state == "VERIFYING":
+
+        if outside:
+
+            abnormal_count += 1
+
+            if abnormal_count >= PERSISTENCE_REQUIRED:
+
+                state = "PERSISTENT"
+
+                strategy = "ADAPTIVE"
+
+                reason = (
+                    "Persistence confirmed.\n"
+                    "AERIS switches to ADAPTIVE\n"
+                    "forecasting."
+                )
+
+            else:
+
+                reason = (
+                    f"Still verifying.\n"
+                    f"Evidence: {abnormal_count}/"
+                    f"{PERSISTENCE_REQUIRED}"
+                )
+
+        else:
+
+            state = "NORMAL"
+
+            strategy = "BASELINE"
+
+            abnormal_count = 0
+
+            reason = (
+                "Deviation disappeared before\n"
+                "persistence was confirmed."
+            )
+
+
+    # ========================================================
+    # PERSISTENT
+    # ========================================================
+
+    elif state == "PERSISTENT":
+
+        if outside:
+
+            recovery_count = 0
+
+            reason = (
+                "Deviation is still outside\n"
+                "the original baseline.\n"
+                "Continue ADAPTIVE forecasting."
+            )
+
+        else:
+
+            recovery_count = 1
+
+            state = "RECOVERING"
+
+            reason = (
+                "Value returned inside the\n"
+                "original baseline.\n"
+                "Checking whether recovery is real."
+            )
+
+
+    # ========================================================
+    # RECOVERING
+    # ========================================================
+
+    elif state == "RECOVERING":
+
+        if outside:
+
+            recovery_count = 0
+
+            state = "PERSISTENT"
+
+            strategy = "ADAPTIVE"
+
+            reason = (
+                "Recovery interrupted.\n"
+                "Deviation returned.\n"
+                "Event remains PERSISTENT."
+            )
+
+        else:
+
+            recovery_count += 1
+
+            if recovery_count >= RECOVERY_REQUIRED:
+
+                state = "RECOVERED"
+
+                strategy = "BASELINE"
+
+                event_end = step
+
+                duration = event_end - event_start + 1
+
+                reason = (
+                    f"Recovery confirmed.\n"
+                    f"Event duration: {duration} observations.\n"
+                    "Return to BASELINE forecasting."
+                )
+
+            else:
+
+                reason = (
+                    f"Recovery continuing.\n"
+                    f"Evidence: {recovery_count}/"
+                    f"{RECOVERY_REQUIRED}"
+                )
+
+
+    # ========================================================
+    # RECOVERED
+    # ========================================================
+
+    elif state == "RECOVERED":
+
+        state = "NORMAL"
+
+        strategy = "BASELINE"
+
+        reason = (
+            "System has returned to\n"
+            "normal operation."
+        )
+
+
+    # --------------------------------------------------------
+    # SAVE HISTORY
+    # --------------------------------------------------------
+
+    value_history.append(value)
+    state_history.append(state)
+    strategy_history.append(strategy)
+    abnormal_history.append(abnormal_count)
+    recovery_history.append(recovery_count)
+
+    return reason
+
+
+# ============================================================
+# MATPLOTLIB FIGURE
+# ============================================================
+
+fig = plt.figure(figsize=(15, 9))
+
+fig.suptitle(
+    "AERIS — Adaptive Disturbance Demonstration",
+    fontsize=20,
+    fontweight="bold"
+)
+
+
+# ------------------------------------------------------------
+# MAIN DEMAND GRAPH
+# ------------------------------------------------------------
+
+ax1 = fig.add_axes([0.07, 0.48, 0.58, 0.42])
+
+ax1.set_title(
+    "Live Demand Observation",
+    fontsize=14,
+    fontweight="bold"
+)
+
+ax1.set_xlabel("Observation")
+ax1.set_ylabel("Demand")
+
+ax1.axhspan(
+    BASELINE_LOWER,
+    BASELINE_UPPER,
+    alpha=0.15,
+    label="Original baseline"
+)
+
+ax1.axhline(
+    BASELINE_MEAN,
+    linestyle="--",
+    linewidth=1.5,
+    label="Baseline mean"
+)
+
+ax1.set_xlim(1, len(observations))
+ax1.set_ylim(85, 150)
+
+ax1.legend(loc="upper left")
+
+line, = ax1.plot(
+    [],
+    [],
+    linewidth=2
+)
+
+points, = ax1.plot(
+    [],
+    [],
+    marker="o",
+    linestyle=""
+)
+
+
+# ------------------------------------------------------------
+# STATE TIMELINE
+# ------------------------------------------------------------
+
+ax2 = fig.add_axes([0.07, 0.08, 0.58, 0.25])
+
+ax2.set_title(
+    "AERIS Decision State Over Time",
+    fontsize=14,
+    fontweight="bold"
+)
+
+ax2.set_xlabel("Observation")
+ax2.set_ylabel("State")
+
+state_numbers = {
+    "NORMAL": 0,
+    "CANDIDATE": 1,
+    "VERIFYING": 2,
+    "PERSISTENT": 3,
+    "RECOVERING": 4,
+    "RECOVERED": 5,
+}
+
+ax2.set_yticks(list(state_numbers.values()))
+ax2.set_yticklabels(list(state_numbers.keys()))
+
+ax2.set_xlim(1, len(observations))
+ax2.set_ylim(-0.5, 5.5)
+
+state_line, = ax2.plot(
+    [],
+    [],
+    linewidth=3
+)
+
+
+# ------------------------------------------------------------
+# INFORMATION PANEL
+# ------------------------------------------------------------
+
+ax3 = fig.add_axes([0.70, 0.08, 0.27, 0.82])
+
+ax3.axis("off")
+
+ax3.set_title(
+    "AERIS LIVE DECISION",
+    fontsize=15,
+    fontweight="bold",
+    pad=20
+)
+
+step_text = ax3.text(
+    0.05,
+    0.88,
+    "",
+    fontsize=12
+)
+
+value_text = ax3.text(
+    0.05,
+    0.81,
+    "",
+    fontsize=12
+)
+
+state_text = ax3.text(
+    0.05,
+    0.72,
+    "",
+    fontsize=17,
+    fontweight="bold"
+)
+
+strategy_text = ax3.text(
+    0.05,
+    0.63,
+    "",
+    fontsize=13
+)
+
+persistence_text = ax3.text(
+    0.05,
+    0.54,
+    "",
+    fontsize=12
+)
+
+recovery_text = ax3.text(
+    0.05,
+    0.46,
+    "",
+    fontsize=12
+)
+
+reason_text = ax3.text(
+    0.05,
+    0.30,
+    "",
+    fontsize=11,
+    va="top"
+)
+
+event_text = ax3.text(
+    0.05,
+    0.12,
+    "",
+    fontsize=11,
+    va="top"
+)
+
+
+# ============================================================
+# ANIMATION FUNCTION
+# ============================================================
+
+def update(frame):
+
+    step = frame + 1
+
+    value = observations[frame]
+
+    reason = process_observation(
+        step,
+        value
+    )
+
+    # --------------------------------------------------------
+    # MAIN GRAPH
+    # --------------------------------------------------------
+
+    x_values = list(
+        range(1, len(value_history) + 1)
+    )
+
+    line.set_data(
+        x_values,
+        value_history
+    )
+
+    points.set_data(
+        x_values,
+        value_history
+    )
+
+    # --------------------------------------------------------
+    # STATE GRAPH
+    # --------------------------------------------------------
+
+    state_values = [
+        state_numbers[s]
+        for s in state_history
+    ]
+
+    state_line.set_data(
+        x_values,
+        state_values
+    )
+
+    # --------------------------------------------------------
+    # INFORMATION PANEL
+    # --------------------------------------------------------
+
+    current_state = state_history[-1]
+
+    step_text.set_text(
+        f"Observation: {step}"
+    )
+
+    value_text.set_text(
+        f"Observed value: {value}"
+    )
+
+    state_text.set_text(
+        f"STATE: {current_state}"
+    )
+
+    strategy_text.set_text(
+        f"Forecast strategy: {strategy_history[-1]}"
+    )
+
+    persistence_text.set_text(
+        f"Persistence: "
+        f"{abnormal_history[-1]}/"
+        f"{PERSISTENCE_REQUIRED}"
+    )
+
+    recovery_text.set_text(
+        f"Recovery: "
+        f"{recovery_history[-1]}/"
+        f"{RECOVERY_REQUIRED}"
+    )
+
+    reason_text.set_text(
+        "WHY?\n\n" + reason
+    )
+
+    if event_start is None:
+
+        event_text.set_text(
+            "Event: None"
+        )
+
+    else:
+
+        if event_end is None:
+
+            duration = step - event_start + 1
+
+            event_text.set_text(
+                f"Event ID: {event_id}\n"
+                f"Event started: observation {event_start}\n"
+                f"Current duration: {duration}"
+            )
+
+        else:
+
+            duration = event_end - event_start + 1
+
+            event_text.set_text(
+                f"Event ID: {event_id}\n"
+                f"Started: observation {event_start}\n"
+                f"Recovered: observation {event_end}\n"
+                f"Total duration: {duration}"
+            )
+
+    # --------------------------------------------------------
+    # STATE TEXT APPEARANCE
+    # --------------------------------------------------------
+
+    state_text.set_color(
+        state_colors.get(
+            current_state,
+            "black"
+        )
+    )
+
+    # --------------------------------------------------------
+    # POINT APPEARANCE
+    # --------------------------------------------------------
+
+    if current_state in [
+        "PERSISTENT",
+        "RECOVERING"
+    ]:
+
+        points.set_markersize(9)
+
+    else:
+
+        points.set_markersize(7)
+
+    return (
+        line,
+        points,
+        state_line,
+        step_text,
+        value_text,
+        state_text,
+        strategy_text,
+        persistence_text,
+        recovery_text,
+        reason_text,
+        event_text
+    )
+
+
+# ============================================================
+# START ANIMATION
+# ============================================================
+
+animation = FuncAnimation(
+    fig,
+    update,
+    frames=len(observations),
+    interval=1200,
+    repeat=False
+)
+
+
+plt.show()
+
