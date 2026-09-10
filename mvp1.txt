@@ -1,0 +1,1231 @@
+"""
+AERIS - Adaptive Electricity Regime Intelligence System
+Interactive Streamlit Dashboard
+"""
+
+import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
+
+from plotly.subplots import make_subplots
+
+from module_1_bocpd import BOCPDConfig
+
+from module_2_regime_classification import (
+    RegimeConfig
+)
+
+from module_4_integration import (
+    AERISPipeline
+)
+
+
+# ============================================================
+# PAGE CONFIG
+# ============================================================
+
+st.set_page_config(
+    page_title="AERIS Dashboard",
+    page_icon="⚡",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+
+# ============================================================
+# CUSTOM CSS
+# ============================================================
+
+st.markdown(
+    """
+    <style>
+
+    .main-title {
+        font-size: 2.2rem;
+        font-weight: 800;
+        margin-bottom: 0px;
+    }
+
+    .sub-title {
+        font-size: 1.05rem;
+        margin-top: 0px;
+        margin-bottom: 15px;
+    }
+
+    .pipeline-card {
+        border-radius: 8px;
+        padding: 12px;
+        border-left: 4px solid;
+    }
+
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+
+# ============================================================
+# HEADER
+# ============================================================
+
+st.markdown(
+    '<div class="main-title">⚡ AERIS</div>',
+    unsafe_allow_html=True
+)
+
+st.markdown(
+    '<div class="sub-title">'
+    '<b>Adaptive Electricity Regime Intelligence System</b> '
+    '| DETECT → UNDERSTAND → ROUTE → QUANTIFY'
+    '</div>',
+    unsafe_allow_html=True
+)
+
+
+# ============================================================
+# SIDEBAR
+# ============================================================
+
+st.sidebar.header(
+    "Configuration Controls"
+)
+
+uploaded_file = st.sidebar.file_uploader(
+    "Upload Excel Dataset",
+    type=["xlsx", "xls"]
+)
+
+
+st.sidebar.subheader(
+    "Module 1: BOCPD"
+)
+
+warmup = st.sidebar.slider(
+    "BOCPD Warmup Steps",
+    10,
+    50,
+    25,
+    step=5
+)
+
+p_thresh = st.sidebar.slider(
+    "P(Change) Threshold",
+    0.15,
+    0.70,
+    0.35,
+    step=0.05
+)
+
+min_confirm = st.sidebar.slider(
+    "Confirmation Persistence Steps",
+    1,
+    5,
+    3,
+    step=1
+)
+
+
+st.sidebar.subheader(
+    "Module 3 & 4: Forecasting"
+)
+
+forecast_win = st.sidebar.slider(
+    "Validation Window (Days)",
+    7,
+    30,
+    14,
+    step=1
+)
+
+calib_win = st.sidebar.slider(
+    "Conformal Calibration Window",
+    10,
+    60,
+    30,
+    step=5
+)
+
+conformal_cov = st.sidebar.slider(
+    "Conformal Target Coverage",
+    0.75,
+    0.98,
+    0.90,
+    step=0.01
+)
+
+
+# ============================================================
+# DATA LOADING
+# ============================================================
+
+@st.cache_data
+def load_data(f_upload):
+
+    if f_upload is not None:
+
+        df = pd.read_excel(
+            f_upload
+        )
+
+    else:
+
+        df = pd.read_excel(
+            "xo.xlsx"
+        )
+
+    # Normalize column names
+    df.columns = [
+        str(c).strip()
+        for c in df.columns
+    ]
+
+    # Timestamp conversion
+    if "timestamp" in df.columns:
+
+        df["timestamp"] = pd.to_datetime(
+            df["timestamp"],
+            errors="coerce"
+        )
+
+        df = df.sort_values(
+            "timestamp"
+        ).reset_index(
+            drop=True
+        )
+
+    # Target conversion
+    if "target" in df.columns:
+
+        df["target"] = pd.to_numeric(
+            df["target"],
+            errors="coerce"
+        )
+
+    return df
+
+
+try:
+
+    raw_df = load_data(
+        uploaded_file
+    )
+
+except Exception as e:
+
+    st.error(
+        f"Error loading dataset: {e}"
+    )
+
+    st.stop()
+
+
+# ============================================================
+# DATA VALIDATION
+# ============================================================
+
+if "target" not in raw_df.columns:
+
+    st.error(
+        "Dataset must contain a 'target' column."
+    )
+
+    st.stop()
+
+if len(raw_df) < 50:
+
+    st.warning(
+        "Dataset contains fewer than 50 rows. "
+        "Forecasting results may be unstable."
+    )
+
+
+# ============================================================
+# PIPELINE
+# ============================================================
+
+@st.cache_resource(
+    show_spinner=
+    "Running AERIS End-to-End Intelligence Loop..."
+)
+def run_aeris_pipeline(
+    df_in,
+    w_up,
+    p_th,
+    m_conf,
+    f_win,
+    c_win,
+    c_cov
+):
+
+    b_cfg = BOCPDConfig(
+        warmup_steps=w_up,
+        p_change_threshold=p_th,
+        min_confirmation_steps=m_conf
+    )
+
+    r_cfg = RegimeConfig()
+
+    pipe = AERISPipeline(
+        bocpd_config=b_cfg,
+        regime_config=r_cfg,
+        forecasting_window=f_win,
+        calibration_window=c_win,
+        conformal_coverage=c_cov
+    )
+
+    return pipe.run_full(
+        df_in,
+        target_col="target"
+    )
+
+
+try:
+
+    results = run_aeris_pipeline(
+        raw_df,
+        warmup,
+        p_thresh,
+        min_confirm,
+        forecast_win,
+        calib_win,
+        conformal_cov
+    )
+
+except Exception as e:
+
+    st.error(
+        f"AERIS pipeline error: {e}"
+    )
+
+    st.exception(e)
+
+    st.stop()
+
+
+if not results:
+
+    st.error(
+        "No pipeline results generated."
+    )
+
+    st.stop()
+
+
+latest = results[-1]
+
+
+# ============================================================
+# SYSTEM OVERVIEW
+# ============================================================
+
+st.markdown(
+    "### SYSTEM OVERVIEW"
+)
+
+k1, k2, k3, k4 = st.columns(4)
+
+k1.metric(
+    "Current Demand",
+    f"{latest.actual_demand:.2f}"
+)
+
+k2.metric(
+    "Forecast",
+    f"{latest.forecast.point_forecast:.2f}"
+)
+
+k3.metric(
+    "Current Regime",
+    latest.regime.regime.name.replace(
+        "_",
+        " "
+    )
+)
+
+k4.metric(
+    "P(Change)",
+    f"{latest.detection.change_probability * 100:.1f}%"
+)
+
+
+k5, k6, k7 = st.columns(3)
+
+k5.metric(
+    "Selected Model",
+    latest.forecast.selected_model
+)
+
+k6.metric(
+    "Prediction Interval",
+    (
+        f"[{latest.conformal.lower_bound:.1f}, "
+        f"{latest.conformal.upper_bound:.1f}]"
+    )
+)
+
+k7.metric(
+    "System Status",
+    latest.detection.detector_status.name
+)
+
+
+# ============================================================
+# END-TO-END PIPELINE
+# ============================================================
+
+st.markdown(
+    "### END-TO-END PIPELINE"
+)
+
+p1, p2, p3, p4, p5 = st.columns(5)
+
+
+with p1:
+
+    st.info(
+        f"""
+        **1. DATA**
+
+        Demand: `{latest.actual_demand:.2f}`
+
+        Step: `T={latest.step}`
+        """
+    )
+
+
+with p2:
+
+    st.warning(
+        f"""
+        **2. DETECT**
+
+        BOCPD P(Change):
+        `{latest.detection.change_probability:.2f}`
+
+        Status:
+        `{latest.detection.detector_status.name}`
+        """
+    )
+
+
+with p3:
+
+    st.info(
+        f"""
+        **3. UNDERSTAND**
+
+        Regime:
+        `{latest.regime.regime.name}`
+
+        Confidence:
+        `{latest.regime.confidence * 100:.0f}%`
+        """
+    )
+
+
+with p4:
+
+    st.success(
+        f"""
+        **4. ROUTE**
+
+        Model:
+        `{latest.forecast.selected_model}`
+
+        Validation:
+        Recent MAE
+        """
+    )
+
+
+with p5:
+
+    st.info(
+        f"""
+        **5. QUANTIFY**
+
+        Interval:
+        `[{latest.conformal.lower_bound:.1f},
+        {latest.conformal.upper_bound:.1f}]`
+
+        Width:
+        `{latest.conformal.interval_width:.1f}`
+        """
+    )
+
+
+st.markdown("---")
+
+
+# ============================================================
+# TABS
+# ============================================================
+
+(
+    t_demand,
+    t_detect,
+    t_regime,
+    t_forecast,
+    t_quant,
+    t_adapt,
+    t_data
+) = st.tabs(
+    [
+        "Demand Monitoring",
+        "Module 1: Detect",
+        "Module 2: Understand",
+        "Module 3: Route & Forecast",
+        "Module 4: Quantify",
+        "Adaptation Status",
+        "Dataset Info"
+    ]
+)
+
+
+# ============================================================
+# COMMON DATA
+# ============================================================
+
+dates = [
+    r.timestamp
+    for r in results
+]
+
+actuals = [
+    r.actual_demand
+    for r in results
+]
+
+preds = [
+    r.forecast.point_forecast
+    for r in results
+]
+
+lowers = [
+    r.conformal.lower_bound
+    for r in results
+]
+
+uppers = [
+    r.conformal.upper_bound
+    for r in results
+]
+
+p_changes = [
+    r.detection.change_probability
+    for r in results
+]
+
+map_rls = [
+    r.detection.map_run_length
+    for r in results
+]
+
+changes_idx = [
+    r.step
+    for r in results
+    if r.detection.is_change_detected
+]
+
+
+# ============================================================
+# DEMAND MONITORING
+# ============================================================
+
+with t_demand:
+
+    st.markdown(
+        "#### Historical & Recent Electricity Demand"
+    )
+
+    fig_d = go.Figure()
+
+    fig_d.add_trace(
+        go.Scatter(
+            x=dates,
+            y=actuals,
+            mode="lines",
+            name="Observed Demand"
+        )
+    )
+
+    fig_d.add_trace(
+        go.Scatter(
+            x=dates,
+            y=pd.Series(
+                actuals
+            ).rolling(
+                7
+            ).mean(),
+            mode="lines",
+            name="7-Day Rolling Mean"
+        )
+    )
+
+    fig_d.update_layout(
+        height=420,
+        margin=dict(
+            l=10,
+            r=10,
+            t=30,
+            b=10
+        ),
+        hovermode="x unified"
+    )
+
+    st.plotly_chart(
+        fig_d,
+        use_container_width=True
+    )
+
+
+# ============================================================
+# MODULE 1
+# ============================================================
+
+with t_detect:
+
+    st.markdown(
+        "#### Bayesian Online Change-Point Detection"
+    )
+
+    c1, c2, c3, c4 = st.columns(4)
+
+    c1.metric(
+        "Latest P(Change)",
+        f"{latest.detection.change_probability:.3f}"
+    )
+
+    c2.metric(
+        "MAP Run Length",
+        f"{latest.detection.map_run_length}"
+    )
+
+    c3.metric(
+        "Detector Status",
+        latest.detection.detector_status.name
+    )
+
+    c4.metric(
+        "Confirmed Changes",
+        len(changes_idx)
+    )
+
+
+    fig_det = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        subplot_titles=(
+            "Demand with Confirmed Change Points",
+            "Bayesian Change Probability"
+        )
+    )
+
+
+    fig_det.add_trace(
+        go.Scatter(
+            x=dates,
+            y=actuals,
+            name="Demand"
+        ),
+        row=1,
+        col=1
+    )
+
+
+    for c_i in changes_idx:
+
+        if 1 <= c_i <= len(dates):
+
+            fig_det.add_vline(
+                x=dates[c_i - 1],
+                line_width=1.5,
+                line_dash="dash",
+                row=1,
+                col=1
+            )
+
+
+    fig_det.add_trace(
+        go.Scatter(
+            x=dates,
+            y=p_changes,
+            name="P(Change)"
+        ),
+        row=2,
+        col=1
+    )
+
+
+    fig_det.add_hline(
+        y=p_thresh,
+        line_dash="dot",
+        annotation_text="Threshold",
+        row=2,
+        col=1
+    )
+
+
+    fig_det.update_layout(
+        height=500,
+        margin=dict(
+            l=10,
+            r=10,
+            t=40,
+            b=10
+        ),
+        hovermode="x unified"
+    )
+
+
+    st.plotly_chart(
+        fig_det,
+        use_container_width=True
+    )
+
+
+    st.write(
+        "Change evidence accumulation:",
+        latest.detection.consecutive_warnings
+    )
+
+
+# ============================================================
+# MODULE 2
+# ============================================================
+
+with t_regime:
+
+    st.markdown(
+        "#### Demand Regime Understanding"
+    )
+
+    r1, r2 = st.columns(2)
+
+    with r1:
+
+        st.info(
+            f"""
+            **Current Regime**
+
+            `{latest.regime.regime.name}`
+
+            **Confidence**
+
+            `{latest.regime.confidence * 100:.1f}%`
+            """
+        )
+
+
+    with r2:
+
+        st.write(
+            "**Classification Reason:**"
+        )
+
+        st.write(
+            latest.regime.classification_reason
+        )
+
+
+    st.markdown(
+        "##### Recent Regime Timeline"
+    )
+
+
+    timeline_df = pd.DataFrame(
+        [
+            {
+                "Date": (
+                    r.timestamp.strftime(
+                        "%Y-%m-%d"
+                    )
+                    if hasattr(
+                        r.timestamp,
+                        "strftime"
+                    )
+                    else str(
+                        r.timestamp
+                    )
+                ),
+
+                "Demand":
+                    f"{r.actual_demand:.2f}",
+
+                "Regime":
+                    r.regime.regime.name,
+
+                "Confidence":
+                    f"{r.regime.confidence * 100:.0f}%",
+
+                "Reason":
+                    r.regime.classification_reason
+            }
+
+            for r in results[-25:]
+        ]
+    )
+
+
+    st.dataframe(
+        timeline_df,
+        use_container_width=True
+    )
+
+
+# ============================================================
+# MODULE 3
+# ============================================================
+
+with t_forecast:
+
+    st.markdown(
+        "#### Adaptive Model Routing & Forecasting"
+    )
+
+
+    st.write(
+        "**Selection Diagnostic:**"
+    )
+
+    st.write(
+        latest.forecast.selection_reason
+    )
+
+
+    cand_data = [
+
+        {
+            "Candidate Model":
+                c.model_name,
+
+            "Validation MAE":
+                f"{c.mae:.3f}",
+
+            "Validation RMSE":
+                f"{c.rmse:.3f}",
+
+            "Status":
+                "SELECTED"
+                if c.selected
+                else "BENCHMARK"
+        }
+
+        for c in (
+            latest
+            .forecast
+            .candidate_evals
+        )
+    ]
+
+
+    if cand_data:
+
+        st.table(
+            pd.DataFrame(
+                cand_data
+            )
+        )
+
+    else:
+
+        st.info(
+            "Model evaluation is still in warmup."
+        )
+
+
+    st.markdown(
+        "##### Actual vs AERIS Forecast"
+    )
+
+
+    # Only show rows after warmup
+    start_idx = min(
+        warmup,
+        len(dates) - 1
+    )
+
+
+    fig_f = go.Figure()
+
+
+    fig_f.add_trace(
+        go.Scatter(
+            x=dates[start_idx:],
+            y=actuals[start_idx:],
+            mode="lines",
+            name="Actual Demand"
+        )
+    )
+
+
+    fig_f.add_trace(
+        go.Scatter(
+            x=dates[start_idx:],
+            y=preds[start_idx:],
+            mode="lines",
+            name="AERIS Forecast",
+            line=dict(
+                dash="dash",
+                width=2
+            )
+        )
+    )
+
+
+    fig_f.update_layout(
+        height=420,
+        margin=dict(
+            l=10,
+            r=10,
+            t=30,
+            b=10
+        ),
+        hovermode="x unified",
+        title="Walk-Forward Actual vs Predicted Demand"
+    )
+
+
+    st.plotly_chart(
+        fig_f,
+        use_container_width=True
+    )
+
+
+# ============================================================
+# MODULE 4
+# ============================================================
+
+with t_quant:
+
+    st.markdown(
+        "#### Adaptive Conformal Uncertainty Bounds"
+    )
+
+
+    q1, q2, q3, q4 = st.columns(4)
+
+
+    q1.metric(
+        "Lower Bound",
+        f"{latest.conformal.lower_bound:.2f}"
+    )
+
+
+    q2.metric(
+        "Point Forecast",
+        f"{latest.conformal.point_forecast:.2f}"
+    )
+
+
+    q3.metric(
+        "Upper Bound",
+        f"{latest.conformal.upper_bound:.2f}"
+    )
+
+
+    q4.metric(
+        "Interval Width",
+        f"{latest.conformal.interval_width:.2f}"
+    )
+
+
+    fig_q = go.Figure()
+
+
+    fig_q.add_trace(
+        go.Scatter(
+            x=dates[start_idx:],
+            y=actuals[start_idx:],
+            mode="lines",
+            name="Actual Demand"
+        )
+    )
+
+
+    fig_q.add_trace(
+        go.Scatter(
+            x=dates[start_idx:],
+            y=preds[start_idx:],
+            mode="lines",
+            name="Point Prediction",
+            line=dict(
+                width=2
+            )
+        )
+    )
+
+
+    # Prediction interval
+    interval_x = (
+        dates[start_idx:]
+        + dates[start_idx:][::-1]
+    )
+
+    interval_y = (
+        uppers[start_idx:]
+        + lowers[start_idx:][::-1]
+    )
+
+
+    fig_q.add_trace(
+        go.Scatter(
+            x=interval_x,
+            y=interval_y,
+            fill="toself",
+            line=dict(
+                width=0
+            ),
+            name=(
+                f"{int(conformal_cov * 100)}% "
+                "Conformal Interval"
+            )
+        )
+    )
+
+
+    fig_q.update_layout(
+        height=450,
+        margin=dict(
+            l=10,
+            r=10,
+            t=30,
+            b=10
+        ),
+        hovermode="x unified"
+    )
+
+
+    st.plotly_chart(
+        fig_q,
+        use_container_width=True
+    )
+
+
+# ============================================================
+# ADAPTATION
+# ============================================================
+
+with t_adapt:
+
+    st.markdown(
+        "#### System Adaptation State"
+    )
+
+
+    a1, a2 = st.columns(2)
+
+
+    with a1:
+
+        st.metric(
+            "Adaptation Fired",
+            "YES"
+            if latest.adaptation_triggered
+            else "NO"
+        )
+
+        st.metric(
+            "Change Evidence Accumulation",
+            latest.detection.consecutive_warnings
+        )
+
+
+    with a2:
+
+        st.info(
+            f"""
+            **Adaptation Reason**
+
+            {latest.adaptation_reason}
+            """
+        )
+
+
+    st.markdown(
+        "##### Adaptation Timeline"
+    )
+
+
+    adaptation_df = pd.DataFrame(
+        [
+            {
+                "Date": (
+                    r.timestamp.strftime(
+                        "%Y-%m-%d"
+                    )
+                    if hasattr(
+                        r.timestamp,
+                        "strftime"
+                    )
+                    else str(
+                        r.timestamp
+                    )
+                ),
+
+                "Regime":
+                    r.regime.regime.name,
+
+                "Adaptation":
+                    "YES"
+                    if r.adaptation_triggered
+                    else "NO",
+
+                "Reason":
+                    r.adaptation_reason
+            }
+
+            for r in results[-30:]
+        ]
+    )
+
+
+    st.dataframe(
+        adaptation_df,
+        use_container_width=True
+    )
+
+
+# ============================================================
+# DATASET INFO
+# ============================================================
+
+with t_data:
+
+    st.markdown(
+        "#### Dataset Inspection"
+    )
+
+
+    d1, d2, d3, d4 = st.columns(4)
+
+
+    d1.metric(
+        "Total Records",
+        len(raw_df)
+    )
+
+
+    d2.metric(
+        "Columns",
+        len(raw_df.columns)
+    )
+
+
+    d3.metric(
+        "Missing Values",
+        int(
+            raw_df.isnull()
+            .sum()
+            .sum()
+        )
+    )
+
+
+    # Detect sampling frequency
+    if "timestamp" in raw_df.columns:
+
+        try:
+
+            diffs = (
+                raw_df["timestamp"]
+                .dropna()
+                .sort_values()
+                .diff()
+                .dropna()
+            )
+
+            if len(diffs) > 0:
+
+                median_days = (
+                    diffs
+                    .dt.total_seconds()
+                    .median()
+                    / 86400
+                )
+
+                if (
+                    0.8
+                    <= median_days
+                    <= 1.2
+                ):
+
+                    frequency = "Daily"
+
+                elif (
+                    6
+                    <= median_days
+                    <= 8
+                ):
+
+                    frequency = "Weekly"
+
+                elif (
+                    27
+                    <= median_days
+                    <= 32
+                ):
+
+                    frequency = "Monthly"
+
+                else:
+
+                    frequency = (
+                        f"{median_days:.1f} days"
+                    )
+
+            else:
+
+                frequency = "Unknown"
+
+        except Exception:
+
+            frequency = "Unknown"
+
+    else:
+
+        frequency = "Unknown"
+
+
+    d4.metric(
+        "Sampling Frequency",
+        frequency
+    )
+
+
+    st.markdown(
+        "##### Dataset Preview"
+    )
+
+
+    st.dataframe(
+        raw_df.head(15),
+        use_container_width=True
+    )
+
+
+    st.markdown(
+        "##### Dataset Statistics"
+    )
+
+
+    st.dataframe(
+        raw_df.describe(
+            include="all"
+        ),
+        use_container_width=True
+    )
+
+
+# ============================================================
+# FOOTER
+# ============================================================
+
+st.markdown("---")
+
+st.caption(
+    "AERIS | Adaptive Electricity Regime Intelligence System | "
+    "DETECT → UNDERSTAND → ROUTE → QUANTIFY"
+)
